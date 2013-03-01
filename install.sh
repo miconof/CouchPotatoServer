@@ -10,7 +10,7 @@ fi
 echo "Copying config files..."
 sudo cp init/raspi /etc/init.d/couchpotato
 sudo chmod 777 /etc/init.d/couchpotato
-mkdir -p tor
+mkdir -p torrents
 
 echo "Start couchpotato service and add it to the default runlevel..."
 sudo /etc/init.d/couchpotato start
