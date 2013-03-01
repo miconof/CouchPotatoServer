@@ -53,7 +53,8 @@ class Core(Plugin):
         addEvent('setting.save.core.api_key', self.checkApikey)
 
         # Make sure we can close-down with ctrl+c properly
-        self.signalHandler()
+        if not Env.get('desktop'):
+            self.signalHandler()
 
     def md5Password(self, value):
         return md5(value.encode(Env.get('encoding'))) if value else ''
@@ -69,7 +70,7 @@ class Core(Plugin):
 
     def available(self):
         return jsonified({
-            'succes': True
+            'success': True
         })
 
     def shutdown(self):
@@ -101,7 +102,7 @@ class Core(Plugin):
 
         self.shutdown_started = True
 
-        fireEvent('app.shutdown')
+        fireEvent('app.do_shutdown')
         log.debug('Every plugin got shutdown event')
 
         loop = True
@@ -151,7 +152,7 @@ class Core(Plugin):
 
     def createBaseUrl(self):
         host = Env.setting('host')
-        if host == '0.0.0.0':
+        if host == '0.0.0.0' or host == '':
             host = 'localhost'
         port = Env.setting('port')
 
@@ -175,8 +176,10 @@ class Core(Plugin):
         })
 
     def signalHandler(self):
+        if Env.get('daemonized'): return
 
         def signal_handler(signal, frame):
-            fireEvent('app.shutdown')
+            fireEvent('app.shutdown', single = True)
 
         signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
