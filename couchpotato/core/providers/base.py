@@ -46,7 +46,8 @@ class Provider(Plugin):
 
     def getJsonData(self, url, **kwargs):
 
-        data = self.getCache(md5(url), url, **kwargs)
+        cache_key = '%s%s' % (md5(url), md5('%s' % kwargs.get('params', {})))
+        data = self.getCache(cache_key, url, **kwargs)
 
         if data:
             try:
@@ -58,9 +59,10 @@ class Provider(Plugin):
 
     def getRSSData(self, url, item_path = 'channel/item', **kwargs):
 
-        data = self.getCache(md5(url), url, **kwargs)
+        cache_key = '%s%s' % (md5(url), md5('%s' % kwargs.get('params', {})))
+        data = self.getCache(cache_key, url, **kwargs)
 
-        if data:
+        if data and len(data) > 0:
             try:
                 data = XMLTree.fromstring(data)
                 return self.getElements(data, item_path)
@@ -70,7 +72,9 @@ class Provider(Plugin):
         return []
 
     def getHTMLData(self, url, **kwargs):
-        return self.getCache(md5(url), url, **kwargs)
+
+        cache_key = '%s%s' % (md5(url), md5('%s' % kwargs.get('params', {})))
+        return self.getCache(cache_key, url, **kwargs)
 
 
 class YarrProvider(Provider):
@@ -82,6 +86,7 @@ class YarrProvider(Provider):
     sizeKb = ['kb', 'kib']
 
     login_opener = None
+    last_login_check = 0
 
     def __init__(self):
         addEvent('provider.enabled_types', self.getEnabledProviderType)
@@ -97,29 +102,49 @@ class YarrProvider(Provider):
 
     def login(self):
 
+        # Check if we are still logged in every hour
+        now = time.time()
+        if self.login_opener and self.last_login_check < (now - 3600):
+            try:
+                output = self.urlopen(self.urls['login_check'], opener = self.login_opener)
+                if self.loginCheckSuccess(output):
+                    self.last_login_check = now
+                    return True
+                else:
+                    self.login_opener = None
+            except:
+                self.login_opener = None
+
+        if self.login_opener:
+            return True
+
         try:
             cookiejar = cookielib.CookieJar()
             opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(cookiejar))
-            urllib2.install_opener(opener)
-            log.info2('Logging into %s', self.urls['login'])
-            f = opener.open(self.urls['login'], self.getLoginParams())
-            output = f.read()
-            f.close()
+            output = self.urlopen(self.urls['login'], params = self.getLoginParams(), opener = opener)
 
             if self.loginSuccess(output):
+                self.last_login_check = now
                 self.login_opener = opener
                 return True
-        except:
-            log.error('Failed to login %s: %s', (self.getName(), traceback.format_exc()))
 
+            error = 'unknown'
+        except:
+            error = traceback.format_exc()
+
+        self.login_opener = None
+        log.error('Failed to login %s: %s', (self.getName(), error))
         return False
 
     def loginSuccess(self, output):
         return True
 
+    def loginCheckSuccess(self, output):
+        return True
+
     def loginDownload(self, url = '', nzb_id = ''):
         try:
-            if not self.login_opener and not self.login():
+            if not self.login():
                 log.error('Failed downloading from %s', self.getName())
             return self.urlopen(url, opener = self.login_opener)
         except:
@@ -142,7 +167,7 @@ class YarrProvider(Provider):
             return []
 
         # Login if needed
-        if self.urls.get('login') and (not self.login_opener and not self.login()):
+        if self.urls.get('login') and not self.login():
             log.error('Failed to login to: %s', self.getName())
             return []
 
@@ -174,7 +199,7 @@ class YarrProvider(Provider):
                     if hostname in download_url:
                         return self
         except:
-            log.debug('Url % s doesn\'t belong to %s', (url, self.getName()))
+            log.debug('Url %s doesn\'t belong to %s', (url, self.getName()))
 
         return
 
@@ -250,7 +275,7 @@ class ResultList(list):
             'id': 0,
             'type': self.provider.type,
             'provider': self.provider.getName(),
-            'download': self.provider.download,
+            'download': self.provider.loginDownload if self.provider.urls.get('login') else self.provider.download,
             'url': '',
             'name': '',
             'age': 0,

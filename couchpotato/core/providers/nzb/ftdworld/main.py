@@ -3,7 +3,6 @@ from couchpotato.core.helpers.variable import tryInt
 from couchpotato.core.logger import CPLog
 from couchpotato.core.providers.nzb.base import NZBProvider
 from couchpotato.environment import Env
-from dateutil.parser import parse
 import json
 import traceback
 
@@ -17,6 +16,7 @@ class FTDWorld(NZBProvider):
         'detail': 'http://ftdworld.net/spotinfo.php?id=%s',
         'download': 'http://ftdworld.net/cgi-bin/nzbdown.pl?fileID=%s',
         'login': 'http://ftdworld.net/api/login.php',
+        'login_check': 'http://ftdworld.net/api/login.php',
     }
 
     http_time_between_calls = 3 #seconds
@@ -59,7 +59,6 @@ class FTDWorld(NZBProvider):
                         'age': self.calculateAge(tryInt(item.get('Created'))),
                         'size': item.get('Size', 0),
                         'url': self.urls['download'] % nzb_id,
-                        'download': self.loginDownload,
                         'detail_url': self.urls['detail'] % nzb_id,
                         'score': (tryInt(item.get('webPlus', 0)) - tryInt(item.get('webMin', 0))) * 3,
                     })
@@ -79,3 +78,6 @@ class FTDWorld(NZBProvider):
             return json.loads(output).get('goodToGo', False)
         except:
             return False
+
+    loginCheckSuccess = loginSuccess
+

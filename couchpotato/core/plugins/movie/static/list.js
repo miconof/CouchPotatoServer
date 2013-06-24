@@ -1,36 +1,55 @@
 var MovieList = new Class({
 
-	Implements: [Options],
+	Implements: [Events, Options],
 
 	options: {
 		navigation: true,
 		limit: 50,
+		load_more: true,
+		loader: true,
 		menu: [],
-		add_new: false
+		add_new: false,
+		force_view: false
 	},
 
 	movies: [],
 	movies_added: {},
+	total_movies: 0,
 	letters: {},
-	filter: {
-		'startswith': null,
-		'search': null
-	},
+	filter: null,
 
 	initialize: function(options){
 		var self = this;
 		self.setOptions(options);
 
 		self.offset = 0;
+		self.filter = self.options.filter || {
+			'starts_with': null,
+			'search': null
+		}
 
 		self.el = new Element('div.movies').adopt(
+			self.title = self.options.title ? new Element('h2', {
+				'text': self.options.title,
+				'styles': {'display': 'none'}
+			}) : null,
+			self.description = self.options.description ? new Element('div.description', {
+				'html': self.options.description,
+				'styles': {'display': 'none'}
+			}) : null,
 			self.movie_list = new Element('div'),
-			self.load_more = new Element('a.load_more', {
+			self.load_more = self.options.load_more ? new Element('a.load_more', {
 				'events': {
 					'click': self.loadMore.bind(self)
 				}
-			})
+			}) : null
 		);
+
+		if($(window).getSize().x <= 480 && !self.options.force_view)
+			self.changeView('list');
+		else
+			self.changeView(self.getSavedView() || self.options.view || 'details');
+
 		self.getMovies();
 
 		App.addEvent('movie.added', self.movieAdded.bind(self))
@@ -44,7 +63,8 @@ var MovieList = new Class({
 			self.movies.each(function(movie){
 				if(movie.get('id') == notification.data.id){
 					movie.destroy();
-					delete self.movies_added[notification.data.id]
+					delete self.movies_added[notification.data.id];
+					self.setCounter(self.counter_count-1);
 				}
 			})
 		}
@@ -58,6 +78,7 @@ var MovieList = new Class({
 		if(self.options.add_new && !self.movies_added[notification.data.id] && notification.data.status.identifier == self.options.status){
 			window.scroll(0,0);
 			self.createMovie(notification.data, 'top');
+			self.setCounter(self.counter_count+1);
 
 			self.checkIfEmpty();
 		}
@@ -70,22 +91,14 @@ var MovieList = new Class({
 		if(self.options.navigation)
 			self.createNavigation();
 
-		self.movie_list.addEvents({
-			'mouseenter:relay(.movie)': function(e, el){
-				el.addClass('hover');
-			},
-			'mouseleave:relay(.movie)': function(e, el){
-				el.removeClass('hover');
-			}
-		});
-
-		self.scrollspy = new ScrollSpy({
-			min: function(){
-				var c = self.load_more.getCoordinates()
-				return c.top - window.document.getSize().y - 300
-			},
-			onEnter: self.loadMore.bind(self)
-		});
+		if(self.options.load_more)
+			self.scrollspy = new ScrollSpy({
+				min: function(){
+					var c = self.load_more.getCoordinates()
+					return c.top - window.document.getSize().y - 300
+				},
+				onEnter: self.loadMore.bind(self)
+			});
 
 		self.created = true;
 	},
@@ -96,7 +109,7 @@ var MovieList = new Class({
 		if(!self.created) self.create();
 
 		// do scrollspy
-		if(movies.length < self.options.limit){
+		if(movies.length < self.options.limit && self.scrollspy){
 			self.load_more.hide();
 			self.scrollspy.stop();
 		}
@@ -105,7 +118,7 @@ var MovieList = new Class({
 			self.createMovie(movie);
 		});
 
-		self.total_movies = total;
+		self.total_movies += total;
 		self.setCounter(total);
 
 	},
@@ -115,24 +128,53 @@ var MovieList = new Class({
 
 		if(!self.navigation_counter) return;
 
-		self.navigation_counter.set('text', (count || 0));
+		self.counter_count = count;
+		self.navigation_counter.set('text', (count || 0) + ' movies');
+
+		if (self.empty_message) {
+			self.empty_message.destroy();
+			self.empty_message = null;
+		}
+
+		if(self.total_movies && count == 0 && !self.empty_message){
+			var message = (self.filter.search ? 'for "'+self.filter.search+'"' : '') +
+				(self.filter.starts_with ? ' in <strong>'+self.filter.starts_with+'</strong>' : '');
+
+			self.empty_message = new Element('.message', {
+				'html': 'No movies found ' + message + '.<br/>'
+			}).grab(
+				new Element('a', {
+					'text': 'Reset filter',
+					'events': {
+						'click': function(){
+							self.filter = {
+								'starts_with': null,
+								'search': null
+							};
+							self.navigation_search_input.set('value', '');
+							self.reset();
+							self.activateLetter();
+							self.getMovies(true);
+							self.last_search_value = '';
+						}
+					}
+				})
+			).inject(self.movie_list);
+
+		}
 
 	},
 
 	createMovie: function(movie, inject_at){
 		var self = this;
-
-		// Attach proper actions
-		var a = self.options.actions,
-			status = Status.get(movie.status_id);
-		var actions = a[status.identifier.capitalize()] || a.Wanted || {};
-
 		var m = new Movie(self, {
-			'actions': actions,
+			'actions': self.options.actions,
 			'view': self.current_view,
 			'onSelect': self.calculateSelected.bind(self)
 		}, movie);
+
 		$(m).inject(self.movie_list, inject_at || 'bottom');
+
 		m.fireEvent('injected');
 
 		self.movies.include(m)
@@ -143,29 +185,9 @@ var MovieList = new Class({
 		var self = this;
 		var chars = '#ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
-		self.current_view = self.getSavedView();
-		self.el.addClass(self.current_view+'_list')
+		self.el.addClass('with_navigation')
 
 		self.navigation = new Element('div.alph_nav').adopt(
-			self.navigation_actions = new Element('ul.inlay.actions.reversed'),
-			self.navigation_counter = new Element('span.counter[title=Total]'),
-			self.navigation_alpha = new Element('ul.numbers', {
-				'events': {
-					'click:relay(li)': function(e, el){
-						self.movie_list.empty()
-						self.activateLetter(el.get('data-letter'))
-						self.getMovies()
-					}
-				}
-			}),
-			self.navigation_search_input = new Element('input.inlay', {
-				'placeholder': 'Search',
-				'events': {
-					'keyup': self.search.bind(self),
-					'change': self.search.bind(self)
-				}
-			}),
-			self.navigation_menu = new Block.Menu(self),
 			self.mass_edit_form = new Element('div.mass_edit_form').adopt(
 				new Element('span.select').adopt(
 					self.mass_edit_select = new Element('input[type=checkbox].inlay', {
@@ -203,6 +225,31 @@ var MovieList = new Class({
 						}
 					})
 				)
+			),
+			new Element('div.menus').adopt(
+				self.navigation_counter = new Element('span.counter[title=Total]'),
+				self.filter_menu = new Block.Menu(self, {
+					'class': 'filter'
+				}),
+				self.navigation_actions = new Element('ul.actions', {
+					'events': {
+						'click:relay(li)': function(e, el){
+							var a = 'active';
+							self.navigation_actions.getElements('.'+a).removeClass(a);
+							self.changeView(el.get('data-view'));
+							this.addClass(a);
+
+							el.inject(el.getParent(), 'top');
+							el.getSiblings().hide()
+							setTimeout(function(){
+								el.getSiblings().setStyle('display', null);
+							}, 100)
+						}
+					}
+				}),
+				self.navigation_menu = new Block.Menu(self, {
+					'class': 'extra'
+				})
 			)
 		).inject(self.el, 'top');
 
@@ -215,20 +262,39 @@ var MovieList = new Class({
 			}).inject(self.mass_edit_quality)
 		});
 
-		// Actions
-		['mass_edit', 'thumbs', 'list'].each(function(view){
-			self.navigation_actions.adopt(
-				new Element('li.'+view+(self.current_view == view ? '.active' : '')+'[data-view='+view+']', {
-					'events': {
-						'click': function(e){
-							var a = 'active';
-							self.navigation_actions.getElements('.'+a).removeClass(a);
-							self.changeView(this.get('data-view'));
-							this.addClass(a);
-						}
+		self.filter_menu.addLink(
+			self.navigation_search_input = new Element('input', {
+				'title': 'Search through ' + self.options.identifier,
+				'placeholder': 'Search through ' + self.options.identifier,
+				'events': {
+					'keyup': self.search.bind(self),
+					'change': self.search.bind(self)
+				}
+			})
+		).addClass('search');
+
+		self.filter_menu.addEvent('open', function(){
+			self.navigation_search_input.focus();
+		});
+
+		self.filter_menu.addLink(
+			self.navigation_alpha = new Element('ul.numbers', {
+				'events': {
+					'click:relay(li.available)': function(e, el){
+						self.activateLetter(el.get('data-letter'))
+						self.getMovies(true)
 					}
-				}).adopt(new Element('span'))
-			)
+				}
+			})
+		);
+
+		// Actions
+		['mass_edit', 'details', 'list'].each(function(view){
+			var current = self.current_view == view;
+			new Element('li', {
+				'class': 'icon2 ' + view + (current ?  ' active ' : ''),
+				'data-view': view
+			}).inject(self.navigation_actions, current ? 'top' : 'bottom');
 		});
 
 		// All
@@ -246,18 +312,19 @@ var MovieList = new Class({
 		});
 
 		// Get available chars and highlight
-		Api.request('movie.available_chars', {
-			'data': Object.merge({
-				'status': self.options.status
-			}, self.filter),
-			'onComplete': function(json){
+		if(self.navigation.isDisplayed() || self.navigation.isVisible())
+			Api.request('movie.available_chars', {
+				'data': Object.merge({
+					'status': self.options.status
+				}, self.filter),
+				'onSuccess': function(json){
 
-				json.chars.split('').each(function(c){
-					self.letters[c.capitalize()].addClass('available')
-				})
+					json.chars.split('').each(function(c){
+						self.letters[c.capitalize()].addClass('available')
+					})
 
-			}
-		});
+				}
+			});
 
 		// Add menu or hide
 		if (self.options.menu.length > 0)
@@ -265,17 +332,7 @@ var MovieList = new Class({
 				self.navigation_menu.addLink(menu_item);
 			})
 		else
-			self.navigation_menu.hide()
-
-		self.nav_scrollspy = new ScrollSpy({
-			min: 10,
-			onEnter: function(){
-				self.navigation.addClass('float')
-			},
-			onLeave: function(){
-				self.navigation.removeClass('float')
-			}
-		});
+			self.navigation_menu.hide();
 
 	},
 
@@ -323,14 +380,14 @@ var MovieList = new Class({
 							self.movies.each(function(movie){
 								if (movie.isSelected()){
 									$(movie).destroy()
-									erase_movies.include(movie)
+									erase_movies.include(movie);
 								}
 							});
 
 							erase_movies.each(function(movie){
 								self.movies.erase(movie);
-
-								movie.destroy()
+								movie.destroy();
+								self.setCounter(self.counter_count-1);
 							});
 
 							self.calculateSelected();
@@ -398,11 +455,16 @@ var MovieList = new Class({
 		var self = this;
 
 		self.movies = []
-		self.calculateSelected()
-		self.navigation_alpha.getElements('.active').removeClass('active')
+		if(self.mass_edit_select)
+			self.calculateSelected()
+		if(self.navigation_alpha)
+			self.navigation_alpha.getElements('.active').removeClass('active')
+
 		self.offset = 0;
-		self.load_more.show();
-		self.scrollspy.start();
+		if(self.scrollspy){
+			self.load_more.show();
+			self.scrollspy.start();
+		}
 	},
 
 	activateLetter: function(letter){
@@ -418,21 +480,17 @@ var MovieList = new Class({
 	changeView: function(new_view){
 		var self = this;
 
-		self.movies.each(function(movie){
-			movie.changeView(new_view)
-		});
-
 		self.el
 			.removeClass(self.current_view+'_list')
 			.addClass(new_view+'_list')
 
 		self.current_view = new_view;
-		Cookie.write(self.options.identifier+'_view', new_view, {duration: 1000});
+		Cookie.write(self.options.identifier+'_view2', new_view, {duration: 1000});
 	},
 
 	getSavedView: function(){
 		var self = this;
-		return Cookie.read(self.options.identifier+'_view') || 'thumbs';
+		return Cookie.read(self.options.identifier+'_view2');
 	},
 
 	search: function(){
@@ -448,8 +506,7 @@ var MovieList = new Class({
 			self.activateLetter();
 			self.filter.search = search_value;
 
-			self.movie_list.empty();
-			self.getMovies();
+			self.getMovies(true);
 
 			self.last_search_value = search_value;
 
@@ -461,27 +518,62 @@ var MovieList = new Class({
 		var self = this;
 
 		self.reset();
-		self.movie_list.empty();
-		self.getMovies();
+		self.getMovies(true);
 	},
 
-	getMovies: function(){
+	getMovies: function(reset){
 		var self = this;
 
-		if(self.scrollspy) self.scrollspy.stop();
-		self.load_more.set('text', 'loading...');
-		Api.request('movie.list', {
+		if(self.scrollspy){
+			self.scrollspy.stop();
+			self.load_more.set('text', 'loading...');
+		}
+
+		if(self.movies.length == 0 && self.options.loader){
+
+			self.loader_first = new Element('div.loading').adopt(
+				new Element('div.message', {'text': self.options.title ? 'Loading \'' + self.options.title + '\'' : 'Loading...'})
+			).inject(self.el, 'top');
+
+			createSpinner(self.loader_first, {
+				radius: 4,
+				length: 4,
+				width: 1
+			});
+
+			self.el.setStyle('min-height', 93);
+
+		}
+
+		Api.request(self.options.api_call || 'movie.list', {
 			'data': Object.merge({
 				'status': self.options.status,
-				'limit_offset': self.options.limit + ',' + self.offset
+				'limit_offset': self.options.limit ? self.options.limit + ',' + self.offset : null
 			}, self.filter),
-			'onComplete': function(json){
+			'onSuccess': function(json){
+
+				if(reset)
+					self.movie_list.empty();
+
+				if(self.loader_first){
+					var lf = self.loader_first;
+					self.loader_first.addClass('hide')
+					self.loader_first = null;
+					setTimeout(function(){
+						lf.destroy();
+					}, 20000);
+					self.el.setStyle('min-height', null);
+				}
+
 				self.store(json.movies);
 				self.addMovies(json.movies, json.total);
-				self.load_more.set('text', 'load more movies');
-				if(self.scrollspy) self.scrollspy.start();
+				if(self.scrollspy) {
+					self.load_more.set('text', 'load more movies');
+					self.scrollspy.start();
+				}
 
-				self.checkIfEmpty()
+				self.checkIfEmpty();
+				self.fireEvent('loaded');
 			}
 		});
 	},
@@ -502,10 +594,16 @@ var MovieList = new Class({
 	checkIfEmpty: function(){
 		var self = this;
 
-		var is_empty = self.movies.length == 0 && self.total_movies == 0;
+		var is_empty = self.movies.length == 0 && (self.total_movies == 0 || self.total_movies === undefined);
+
+		if(self.title)
+			self.title[is_empty ? 'hide' : 'show']()
+
+		if(self.description)
+			self.description.setStyle('display', [is_empty ? 'none' : ''])
 
 		if(is_empty && self.options.on_empty_element){
-			self.el.grab(self.options.on_empty_element);
+			self.options.on_empty_element.inject(self.loader_first || self.title || self.movie_list, 'after');
 
 			if(self.navigation)
 				self.navigation.hide();

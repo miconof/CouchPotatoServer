@@ -11,20 +11,6 @@ Page.Settings = new Class({
 	current: 'about',
 	has_tab: false,
 
-	initialize: function(options){
-		var self = this;
-		self.parent(options);
-
-		// Add to more menu
-		if(self.name == 'settings')
-			App.getBlock('more').addLink(new Element('a', {
-				'href': App.createUrl(self.name),
-				'text': self.name.capitalize(),
-				'title': self.title
-			}), 'top')
-
-	},
-
 	open: function(action, params){
 		var self = this;
 		self.action = action == 'index' ? self.default_action : action;
@@ -297,7 +283,7 @@ Page.Settings = new Class({
 
 		return group_el
 	},
-	
+
 	createList: function(content_container){
 		return new Element('div.option_list').grab(
 			new Element('h3', {
@@ -876,7 +862,7 @@ Option.Directories = new Class({
 			$(dir).addClass('is_empty');
 
 		// Add remove button
-		new Element('a.icon.delete', {
+		new Element('a.icon2.delete', {
 			'events': {
 				'click': self.delItem.bind(self, dir)
 			}
@@ -1283,6 +1269,7 @@ Option.Combined = new Class({
 		self.values = {}
 		self.inputs = {}
 		self.items = []
+		self.labels = {}
 
 		self.options.combine.each(function(name){
 
@@ -1302,9 +1289,10 @@ Option.Combined = new Class({
 		var head = new Element('div.head').inject(self.combined_list)
 
 		Object.each(self.inputs, function(input, name){
+			self.labels[name] = input.getPrevious().get('text')
 			new Element('abbr', {
 				'class': name,
-				'text': input.getPrevious().get('text'),
+				'text': self.labels[name],
 				//'title': input.getNext().get('text')
 			}).inject(head)
 		})
@@ -1367,7 +1355,7 @@ Option.Combined = new Class({
 				value_count++;
 				new Element('input[type=text].inlay.'+name, {
 					'value': value,
-					'placeholder': name,
+					'placeholder': self.labels[name] || name,
 					'events': {
 						'keyup': self.saveCombined.bind(self),
 						'change': self.saveCombined.bind(self)
@@ -1383,7 +1371,7 @@ Option.Combined = new Class({
 
 		item[value_empty == value_count ? 'addClass' : 'removeClass']('is_empty');
 
-		new Element('a.icon.delete', {
+		new Element('a.icon2.delete', {
 			'events': {
 				'click': self.deleteCombinedItem.bind(self)
 			}

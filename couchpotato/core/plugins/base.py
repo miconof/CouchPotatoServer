@@ -1,12 +1,13 @@
 from StringIO import StringIO
-from couchpotato import addView
 from couchpotato.core.event import fireEvent, addEvent
-from couchpotato.core.helpers.encoding import tryUrlencode, ss, toSafeString
+from couchpotato.core.helpers.encoding import tryUrlencode, ss, toSafeString, \
+    toUnicode
 from couchpotato.core.helpers.variable import getExt, md5
 from couchpotato.core.logger import CPLog
 from couchpotato.environment import Env
-from flask.templating import render_template_string
 from multipartpost import MultipartPostHandler
+from tornado import template
+from tornado.web import StaticFileHandler
 from urlparse import urlparse
 import cookielib
 import glob
@@ -28,6 +29,7 @@ class Plugin(object):
 
     _needs_shutdown = False
 
+    user_agent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.8; rv:24.0) Gecko/20130519 Firefox/24.0'
     http_last_use = {}
     http_time_between_calls = 0
     http_failed_request = {}
@@ -36,6 +38,7 @@ class Plugin(object):
     def registerPlugin(self):
         addEvent('app.do_shutdown', self.doShutdown)
         addEvent('plugin.running', self.isRunning)
+        self._running = []
 
     def conf(self, attr, value = None, default = None):
         return Env.setting(attr, self.getName().lower(), value = value, default = default)
@@ -43,34 +46,36 @@ class Plugin(object):
     def getName(self):
         return self.__class__.__name__
 
-    def renderTemplate(self, parent_file, template, **params):
+    def renderTemplate(self, parent_file, templ, **params):
 
-        template = open(os.path.join(os.path.dirname(parent_file), template), 'r').read()
-        return render_template_string(template, **params)
+        t = template.Template(open(os.path.join(os.path.dirname(parent_file), templ), 'r').read())
+        return t.generate(**params)
 
     def registerStatic(self, plugin_file, add_to_head = True):
 
         # Register plugin path
         self.plugin_path = os.path.dirname(plugin_file)
+        static_folder = toUnicode(os.path.join(self.plugin_path, 'static'))
+
+        if not os.path.isdir(static_folder):
+            return
 
         # Get plugin_name from PluginName
         s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', self.__class__.__name__)
         class_name = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
 
+        # View path
         path = 'api/%s/static/%s/' % (Env.setting('api_key'), class_name)
-        addView(path + '<path:filename>', self.showStatic, static = True)
 
+        # Add handler to Tornado
+        Env.get('app').add_handlers(".*$", [(Env.get('web_base') + path + '(.*)', StaticFileHandler, {'path': static_folder})])
+
+        # Register for HTML <HEAD>
         if add_to_head:
             for f in glob.glob(os.path.join(self.plugin_path, 'static', '*')):
                 ext = getExt(f)
                 if ext in ['js', 'css']:
                     fireEvent('register_%s' % ('script' if ext in 'js' else 'style'), path + os.path.basename(f), f)
-
-    def showStatic(self, filename):
-        d = os.path.join(self.plugin_path, 'static')
-
-        from flask.helpers import send_from_directory
-        return send_from_directory(d, filename)
 
     def createFile(self, path, content, binary = False):
         path = ss(path)
@@ -104,12 +109,15 @@ class Plugin(object):
         if not params: params = {}
 
         # Fill in some headers
-        headers['Referer'] = headers.get('Referer', urlparse(url).hostname)
-        headers['Host'] = headers.get('Host', urlparse(url).hostname)
-        headers['User-Agent'] = headers.get('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.7; rv:10.0.2) Gecko/20100101 Firefox/10.0.2')
-        headers['Accept-encoding'] = headers.get('Accept-encoding', 'gzip')
+        parsed_url = urlparse(url)
+        host = '%s%s' % (parsed_url.hostname, (':' + str(parsed_url.port) if parsed_url.port else ''))
 
-        host = urlparse(url).hostname
+        headers['Referer'] = headers.get('Referer', '%s://%s' % (parsed_url.scheme, host))
+        headers['Host'] = headers.get('Host', host)
+        headers['User-Agent'] = headers.get('User-Agent', self.user_agent)
+        headers['Accept-encoding'] = headers.get('Accept-encoding', 'gzip')
+        headers['Connection'] = headers.get('Connection', 'keep-alive')
+        headers['Cache-Control'] = headers.get('Cache-Control', 'max-age=0')
 
         # Don't try for failed requests
         if self.http_failed_disabled.get(host, 0) > 0:
@@ -126,6 +134,10 @@ class Plugin(object):
         self.wait(host)
         try:
 
+            # Make sure opener has the correct headers
+            if opener:
+                opener.add_headers = headers
+
             if multipart:
                 log.info('Opening multipart url: %s, params: %s', (url, [x for x in params.iterkeys()] if isinstance(params, dict) else 'with data'))
                 request = urllib2.Request(url, params, headers)
@@ -138,8 +150,13 @@ class Plugin(object):
 
                 response = opener.open(request, timeout = timeout)
             else:
-                log.info('Opening url: %s, params: %s', (url, [x for x in params.iterkeys()]))
-                data = tryUrlencode(params) if len(params) > 0 else None
+                log.info('Opening url: %s, params: %s', (url, [x for x in params.iterkeys()] if isinstance(params, dict) else 'with data'))
+
+                if isinstance(params, (str, unicode)) and len(params) > 0:
+                    data = params
+                else:
+                    data = tryUrlencode(params) if len(params) > 0 else None
+
                 request = urllib2.Request(url, data, headers)
 
                 if opener:
@@ -152,8 +169,10 @@ class Plugin(object):
                 buf = StringIO(response.read())
                 f = gzip.GzipFile(fileobj = buf)
                 data = f.read()
+                f.close()
             else:
                 data = response.read()
+            response.close()
 
             self.http_failed_request[host] = 0
         except IOError:
@@ -209,9 +228,6 @@ class Plugin(object):
 
     def isRunning(self, value = None, boolean = True):
 
-        if not hasattr(self, '_running'):
-            self._running = []
-
         if value is None:
             return self._running
 
@@ -240,7 +256,6 @@ class Plugin(object):
                     del kwargs['cache_timeout']
 
                 data = self.urlopen(url, **kwargs)
-
                 if data:
                     self.setCache(cache_key, data, timeout = cache_timeout)
                 return data

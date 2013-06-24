@@ -2,15 +2,16 @@ from couchpotato import get_session
 from couchpotato.api import addApiView
 from couchpotato.core.event import fireEvent, fireEventAsync, addEvent
 from couchpotato.core.helpers.encoding import toUnicode, simplifyString
-from couchpotato.core.helpers.request import getParams, jsonified, getParam
 from couchpotato.core.helpers.variable import getImdb, splitString
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
-from couchpotato.core.settings.model import Library, LibraryTitle, Movie
+from couchpotato.core.settings.model import Library, LibraryTitle, Movie, \
+    Release
 from couchpotato.environment import Env
 from sqlalchemy.orm import joinedload_all
-from sqlalchemy.sql.expression import or_, asc, not_
+from sqlalchemy.sql.expression import or_, asc, not_, desc
 from string import ascii_lowercase
+import time
 
 log = CPLog(__name__)
 
@@ -41,6 +42,7 @@ class MoviePlugin(Plugin):
             'desc': 'List movies in wanted list',
             'params': {
                 'status': {'type': 'array or csv', 'desc': 'Filter movie by status. Example:"active,done"'},
+                'release_status': {'type': 'array or csv', 'desc': 'Filter movie by status of its releases. Example:"snatched,available"'},
                 'limit_offset': {'desc': 'Limit and offset the movie list. Examples: "50" or "50,30"'},
                 'starts_with': {'desc': 'Starts with these characters. Example: "a" returns all movies starting with the letter "a"'},
                 'search': {'desc': 'Search movie title'},
@@ -94,15 +96,42 @@ class MoviePlugin(Plugin):
         addEvent('movie.list', self.list)
         addEvent('movie.restatus', self.restatus)
 
-    def getView(self):
+        # Clean releases that didn't have activity in the last week
+        addEvent('app.load', self.cleanReleases)
+        fireEvent('schedule.interval', 'movie.clean_releases', self.cleanReleases, hours = 4)
 
-        movie_id = getParam('id')
-        movie = self.get(movie_id) if movie_id else None
+    def cleanReleases(self):
 
-        return jsonified({
+        log.debug('Removing releases from dashboard')
+
+        now = time.time()
+        week = 262080
+
+        done_status, available_status, snatched_status = \
+            fireEvent('status.get', ['done', 'available', 'snatched'], single = True)
+
+        db = get_session()
+
+        # get movies last_edit more than a week ago
+        movies = db.query(Movie) \
+            .filter(Movie.status_id == done_status.get('id'), Movie.last_edit < (now - week)) \
+            .all()
+
+        for movie in movies:
+            for rel in movie.releases:
+                if rel.status_id in [available_status.get('id'), snatched_status.get('id')]:
+                    fireEvent('release.delete', id = rel.id, single = True)
+
+        db.expire_all()
+
+    def getView(self, id = None):
+
+        movie = self.get(id) if id else None
+
+        return {
             'success': movie is not None,
             'movie': movie,
-        })
+        }
 
     def get(self, movie_id):
 
@@ -119,23 +148,31 @@ class MoviePlugin(Plugin):
         if m:
             results = m.to_dict(self.default_dict)
 
+        db.expire_all()
         return results
 
-    def list(self, status = ['active'], limit_offset = None, starts_with = None, search = None):
+    def list(self, status = None, release_status = None, limit_offset = None, starts_with = None, search = None, order = None):
 
         db = get_session()
 
         # Make a list from string
-        if not isinstance(status, (list, tuple)):
+        if status and not isinstance(status, (list, tuple)):
             status = [status]
+        if release_status and not isinstance(release_status, (list, tuple)):
+            release_status = [release_status]
 
         q = db.query(Movie) \
-            .join(Movie.library, Library.titles) \
+            .outerjoin(Movie.releases, Movie.library, Library.titles) \
             .filter(LibraryTitle.default == True) \
-            .filter(or_(*[Movie.status.has(identifier = s) for s in status])) \
             .group_by(Movie.id)
 
-        total_count = q.count()
+        # Filter on movie status
+        if status and len(status) > 0:
+            q = q.filter(or_(*[Movie.status.has(identifier = s) for s in status]))
+
+        # Filter on release status
+        if release_status and len(release_status) > 0:
+            q = q.filter(or_(*[Release.status.has(identifier = s) for s in release_status]))
 
         filter_or = []
         if starts_with:
@@ -154,7 +191,12 @@ class MoviePlugin(Plugin):
         if filter_or:
             q = q.filter(or_(*filter_or))
 
-        q = q.order_by(asc(LibraryTitle.simple_title))
+        total_count = q.count()
+
+        if order == 'release_order':
+            q = q.order_by(desc(Release.last_edit))
+        else:
+            q = q.order_by(asc(LibraryTitle.simple_title))
 
         q = q.subquery()
         q2 = db.query(Movie).join((q, q.c.id == Movie.id)) \
@@ -166,7 +208,7 @@ class MoviePlugin(Plugin):
             .options(joinedload_all('files'))
 
         if limit_offset:
-            splt = splitString(limit_offset)
+            splt = splitString(limit_offset) if isinstance(limit_offset, (str, unicode)) else limit_offset
             limit = splt[0]
             offset = 0 if len(splt) is 1 else splt[1]
             q2 = q2.limit(limit).offset(offset)
@@ -174,18 +216,17 @@ class MoviePlugin(Plugin):
         results = q2.all()
         movies = []
         for movie in results:
-            temp = movie.to_dict({
+            movies.append(movie.to_dict({
                 'profile': {'types': {}},
                 'releases': {'files':{}, 'info': {}},
                 'library': {'titles': {}, 'files':{}},
                 'files': {},
-            })
-            movies.append(temp)
+            }))
 
-        #db.close()
+        db.expire_all()
         return (total_count, movies)
 
-    def availableChars(self, status = ['active']):
+    def availableChars(self, status = None, release_status = None):
 
         chars = ''
 
@@ -194,11 +235,20 @@ class MoviePlugin(Plugin):
         # Make a list from string
         if not isinstance(status, (list, tuple)):
             status = [status]
+        if release_status and not isinstance(release_status, (list, tuple)):
+            release_status = [release_status]
 
         q = db.query(Movie) \
-            .join(Movie.library, Library.titles, Movie.status) \
-            .options(joinedload_all('library.titles')) \
-            .filter(or_(*[Movie.status.has(identifier = s) for s in status]))
+            .outerjoin(Movie.releases, Movie.library, Library.titles, Movie.status) \
+            .options(joinedload_all('library.titles'))
+
+        # Filter on movie status
+        if status and len(status) > 0:
+            q = q.filter(or_(*[Movie.status.has(identifier = s) for s in status]))
+
+        # Filter on release status
+        if release_status and len(release_status) > 0:
+            q = q.filter(or_(*[Release.status.has(identifier = s) for s in release_status]))
 
         results = q.all()
 
@@ -206,46 +256,54 @@ class MoviePlugin(Plugin):
             char = movie.library.titles[0].simple_title[0]
             char = char if char in ascii_lowercase else '#'
             if char not in chars:
-                chars += char
+                chars += str(char)
 
-        #db.close()
-        return chars
+        db.expire_all()
+        return ''.join(sorted(chars, key = str.lower))
 
-    def listView(self):
+    def listView(self, **kwargs):
 
-        params = getParams()
-        status = params.get('status', ['active'])
-        limit_offset = params.get('limit_offset', None)
-        starts_with = params.get('starts_with', None)
-        search = params.get('search', None)
+        status = splitString(kwargs.get('status', None))
+        release_status = splitString(kwargs.get('release_status', None))
+        limit_offset = kwargs.get('limit_offset', None)
+        starts_with = kwargs.get('starts_with', None)
+        search = kwargs.get('search', None)
+        order = kwargs.get('order', None)
 
-        total_movies, movies = self.list(status = status, limit_offset = limit_offset, starts_with = starts_with, search = search)
+        total_movies, movies = self.list(
+            status = status,
+            release_status = release_status,
+            limit_offset = limit_offset,
+            starts_with = starts_with,
+            search = search,
+            order = order
+        )
 
-        return jsonified({
+        return {
             'success': True,
             'empty': len(movies) == 0,
             'total': total_movies,
             'movies': movies,
-        })
+        }
 
-    def charView(self):
+    def charView(self, **kwargs):
 
-        params = getParams()
-        status = params.get('status', ['active'])
-        chars = self.availableChars(status)
+        status = splitString(kwargs.get('status', None))
+        release_status = splitString(kwargs.get('release_status', None))
+        chars = self.availableChars(status, release_status)
 
-        return jsonified({
+        return {
             'success': True,
             'empty': len(chars) == 0,
             'chars': chars,
-        })
+        }
 
-    def refresh(self):
+    def refresh(self, id = ''):
 
         db = get_session()
 
-        for id in splitString(getParam('id')):
-            movie = db.query(Movie).filter_by(id = id).first()
+        for x in splitString(id):
+            movie = db.query(Movie).filter_by(id = x).first()
 
             if movie:
 
@@ -254,18 +312,16 @@ class MoviePlugin(Plugin):
                 for title in movie.library.titles:
                     if title.default: default_title = title.title
 
-                fireEvent('notify.frontend', type = 'movie.busy.%s' % id, data = True, message = 'Updating "%s"' % default_title)
-                fireEventAsync('library.update', identifier = movie.library.identifier, default_title = default_title, force = True, on_complete = self.createOnComplete(id))
+                fireEvent('notify.frontend', type = 'movie.busy.%s' % x, data = True)
+                fireEventAsync('library.update', identifier = movie.library.identifier, default_title = default_title, force = True, on_complete = self.createOnComplete(x))
 
-
-        #db.close()
-        return jsonified({
+        db.expire_all()
+        return {
             'success': True,
-        })
+        }
 
-    def search(self):
+    def search(self, q = ''):
 
-        q = getParam('q')
         cache_key = u'%s/%s' % (__name__, simplifyString(q))
         movies = Env.get('cache').get(cache_key)
 
@@ -277,13 +333,13 @@ class MoviePlugin(Plugin):
                 movies = fireEvent('movie.search', q = q, merge = True)
             Env.get('cache').set(cache_key, movies)
 
-        return jsonified({
+        return {
             'success': True,
             'empty': len(movies) == 0 if movies else 0,
             'movies': movies,
-        })
+        }
 
-    def add(self, params = {}, force_readd = True, search_after = True, update_library = False):
+    def add(self, params = {}, force_readd = True, search_after = True, update_library = False, status_id = None):
 
         if not params.get('identifier'):
             msg = 'Can\'t add movie without imdb identifier.'
@@ -305,8 +361,8 @@ class MoviePlugin(Plugin):
         library = fireEvent('library.add', single = True, attrs = params, update_after = update_library)
 
         # Status
-        status_active = fireEvent('status.add', 'active', single = True)
-        status_snatched = fireEvent('status.add', 'snatched', single = True)
+        status_active, snatched_status, ignored_status, done_status, downloaded_status = \
+            fireEvent('status.get', ['active', 'snatched', 'ignored', 'done', 'downloaded'], single = True)
 
         default_profile = fireEvent('profile.default', single = True)
 
@@ -318,7 +374,7 @@ class MoviePlugin(Plugin):
             m = Movie(
                 library_id = library.get('id'),
                 profile_id = params.get('profile_id', default_profile.get('id')),
-                status_id = status_active.get('id'),
+                status_id = status_id if status_id else status_active.get('id'),
             )
             db.add(m)
             db.commit()
@@ -330,10 +386,14 @@ class MoviePlugin(Plugin):
             fireEventAsync('library.update', params.get('identifier'), default_title = params.get('title', ''), on_complete = onComplete)
             search_after = False
         elif force_readd:
+
             # Clean snatched history
             for release in m.releases:
-                if release.status_id == status_snatched.get('id'):
-                    release.delete()
+                if release.status_id in [downloaded_status.get('id'), snatched_status.get('id'), done_status.get('id')]:
+                    if params.get('ignore_previous', False):
+                        release.status_id = ignored_status.get('id')
+                    else:
+                        fireEvent('release.delete', release.id, single = True)
 
             m.profile_id = params.get('profile_id', default_profile.get('id'))
         else:
@@ -341,7 +401,8 @@ class MoviePlugin(Plugin):
             added = False
 
         if force_readd:
-            m.status_id = status_active.get('id')
+            m.status_id = status_id if status_id else status_active.get('id')
+            m.last_edit = int(time.time())
             do_search = True
 
         db.commit()
@@ -362,37 +423,34 @@ class MoviePlugin(Plugin):
         if added:
             fireEvent('notify.frontend', type = 'movie.added', data = movie_dict, message = 'Successfully added "%s" to your wanted list.' % params.get('title', ''))
 
-        #db.close()
+        db.expire_all()
         return movie_dict
 
 
-    def addView(self):
+    def addView(self, **kwargs):
 
-        params = getParams()
+        movie_dict = self.add(params = kwargs)
 
-        movie_dict = self.add(params)
-
-        return jsonified({
+        return {
             'success': True,
             'added': True if movie_dict else False,
             'movie': movie_dict,
-        })
+        }
 
-    def edit(self):
+    def edit(self, id = '', **kwargs):
 
-        params = getParams()
         db = get_session()
 
         available_status = fireEvent('status.get', 'available', single = True)
 
-        ids = splitString(params.get('id'))
+        ids = splitString(id)
         for movie_id in ids:
 
             m = db.query(Movie).filter_by(id = movie_id).first()
             if not m:
                 continue
 
-            m.profile_id = params.get('profile_id')
+            m.profile_id = kwargs.get('profile_id')
 
             # Remove releases
             for rel in m.releases:
@@ -401,9 +459,9 @@ class MoviePlugin(Plugin):
                     db.commit()
 
             # Default title
-            if params.get('default_title'):
+            if kwargs.get('default_title'):
                 for title in m.library.titles:
-                    title.default = toUnicode(params.get('default_title', '')).lower() == toUnicode(title.title).lower()
+                    title.default = toUnicode(kwargs.get('default_title', '')).lower() == toUnicode(title.title).lower()
 
             db.commit()
 
@@ -412,22 +470,20 @@ class MoviePlugin(Plugin):
             movie_dict = m.to_dict(self.default_dict)
             fireEventAsync('searcher.single', movie_dict, on_complete = self.createNotifyFront(movie_id))
 
-        #db.close()
-        return jsonified({
+        db.expire_all()
+        return {
             'success': True,
-        })
+        }
 
-    def deleteView(self):
+    def deleteView(self, id = '', **kwargs):
 
-        params = getParams()
-
-        ids = splitString(params.get('id'))
+        ids = splitString(id)
         for movie_id in ids:
-            self.delete(movie_id, delete_from = params.get('delete_from', 'all'))
+            self.delete(movie_id, delete_from = kwargs.get('delete_from', 'all'))
 
-        return jsonified({
+        return {
             'success': True,
-        })
+        }
 
     def delete(self, movie_id, delete_from = None):
 
@@ -447,7 +503,7 @@ class MoviePlugin(Plugin):
                 total_deleted = 0
                 new_movie_status = None
                 for release in movie.releases:
-                    if delete_from == 'wanted':
+                    if delete_from in ['wanted', 'snatched']:
                         if release.status_id != done_status.get('id'):
                             db.delete(release)
                             total_deleted += 1
@@ -474,13 +530,12 @@ class MoviePlugin(Plugin):
             if deleted:
                 fireEvent('notify.frontend', type = 'movie.deleted', data = movie.to_dict())
 
-        #db.close()
+        db.expire_all()
         return True
 
     def restatus(self, movie_id):
 
-        active_status = fireEvent('status.get', 'active', single = True)
-        done_status = fireEvent('status.get', 'done', single = True)
+        active_status, done_status = fireEvent('status.get', ['active', 'done'], single = True)
 
         db = get_session()
 
@@ -503,7 +558,6 @@ class MoviePlugin(Plugin):
             m.status_id = active_status.get('id') if move_to_wanted else done_status.get('id')
 
         db.commit()
-        #db.close()
 
         return True
 
@@ -513,6 +567,7 @@ class MoviePlugin(Plugin):
             db = get_session()
             movie = db.query(Movie).filter_by(id = movie_id).first()
             fireEventAsync('searcher.single', movie.to_dict(self.default_dict), on_complete = self.createNotifyFront(movie_id))
+            db.expire_all()
 
         return onComplete
 
@@ -523,5 +578,6 @@ class MoviePlugin(Plugin):
             db = get_session()
             movie = db.query(Movie).filter_by(id = movie_id).first()
             fireEvent('notify.frontend', type = 'movie.update.%s' % movie.id, data = movie.to_dict(self.default_dict))
+            db.expire_all()
 
         return notifyFront

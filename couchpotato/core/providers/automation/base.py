@@ -2,6 +2,7 @@ from couchpotato.core.event import addEvent, fireEvent
 from couchpotato.core.logger import CPLog
 from couchpotato.core.providers.base import Provider
 from couchpotato.environment import Env
+from couchpotato.core.helpers.variable import splitString
 import time
 
 log = CPLog(__name__)
@@ -10,6 +11,7 @@ log = CPLog(__name__)
 class Automation(Provider):
 
     enabled_option = 'automation_enabled'
+    http_time_between_calls = 2
 
     interval = 86400
     last_checked = 0
@@ -49,6 +51,7 @@ class Automation(Provider):
 
     def isMinimalMovie(self, movie):
         if not movie.get('rating'):
+            log.info('ignoring %s as no rating is available for.', (movie['original_title']))
             return False
 
         if movie['rating'] and movie['rating'].get('imdb'):
@@ -59,7 +62,26 @@ class Automation(Provider):
             type_value = movie.get(minimal_type, 0)
             type_min = self.getMinimal(minimal_type)
             if type_value < type_min:
-                log.info('%s too low for %s, need %s has %s', (minimal_type, movie['imdb'], type_min, type_value))
+                log.info('%s too low for %s, need %s has %s', (minimal_type, movie['original_title'], type_min, type_value))
+                return False
+
+        movie_genres = [genre.lower() for genre in movie['genres']]
+        required_genres = splitString(self.getMinimal('required_genres').lower())
+        ignored_genres = splitString(self.getMinimal('ignored_genres').lower())
+
+        req_match = 0
+        for req_set in required_genres:
+            req = splitString(req_set, '&')
+            req_match += len(list(set(movie_genres) & set(req))) == len(req)
+
+        if self.getMinimal('required_genres') and req_match == 0:
+            log.info2('Required genre(s) missing for %s', movie['original_title'])
+            return False
+
+        for ign_set in ignored_genres:
+            ign = splitString(ign_set, '&')
+            if len(list(set(movie_genres) & set(ign))) == len(ign):
+                log.info2('%s has blacklisted genre(s): %s', (movie['original_title'], ign))
                 return False
 
         return True

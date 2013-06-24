@@ -2,7 +2,6 @@ from couchpotato import get_session
 from couchpotato.api import addApiView
 from couchpotato.core.event import fireEvent, addEvent
 from couchpotato.core.helpers.encoding import ss
-from couchpotato.core.helpers.request import getParam, jsonified
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
 from couchpotato.core.plugins.scanner.main import Scanner
@@ -41,12 +40,15 @@ class Release(Plugin):
         addEvent('release.clean', self.clean)
 
     def add(self, group):
+
         db = get_session()
 
         identifier = '%s.%s.%s' % (group['library']['identifier'], group['meta_data'].get('audio', 'unknown'), group['meta_data']['quality']['identifier'])
 
+
+        done_status, snatched_status = fireEvent('status.get', ['done', 'snatched'], single = True)
+
         # Add movie
-        done_status = fireEvent('status.get', 'done', single = True)
         movie = db.query(Movie).filter_by(library_id = group['library'].get('id')).first()
         if not movie:
             movie = Movie(
@@ -58,7 +60,6 @@ class Release(Plugin):
             db.commit()
 
         # Add Release
-        snatched_status = fireEvent('status.get', 'snatched', single = True)
         rel = db.query(Relea).filter(
             or_(
                 Relea.identifier == identifier,
@@ -76,15 +77,19 @@ class Release(Plugin):
             db.commit()
 
         # Add each file type
+        added_files = []
         for type in group['files']:
             for cur_file in group['files'][type]:
                 added_file = self.saveFile(cur_file, type = type, include_media_info = type is 'movie')
-                try:
-                    added_file = db.query(File).filter_by(id = added_file.get('id')).one()
-                    rel.files.append(added_file)
-                    db.commit()
-                except Exception, e:
-                    log.debug('Failed to attach "%s" to release: %s', (cur_file, e))
+                added_files.append(added_file.get('id'))
+
+        # Add the release files in batch
+        try:
+            added_files = db.query(File).filter(or_(*[File.id == x for x in added_files])).all()
+            rel.files.extend(added_files)
+            db.commit()
+        except Exception, e:
+            log.debug('Failed to attach "%s" to release: %s', (cur_file, e))
 
         fireEvent('movie.restatus', movie.id)
 
@@ -102,13 +107,11 @@ class Release(Plugin):
         # Check database and update/insert if necessary
         return fireEvent('file.add', path = filepath, part = fireEvent('scanner.partnumber', file, single = True), type_tuple = Scanner.file_types.get(type), properties = properties, single = True)
 
-    def deleteView(self):
+    def deleteView(self, id = None, **kwargs):
 
-        release_id = getParam('id')
-
-        return jsonified({
-            'success': self.delete(release_id)
-        })
+        return {
+            'success': self.delete(id)
+        }
 
     def delete(self, id):
 
@@ -140,27 +143,25 @@ class Release(Plugin):
 
         return False
 
-    def ignore(self):
+    def ignore(self, id = None, **kwargs):
 
         db = get_session()
-        id = getParam('id')
 
         rel = db.query(Relea).filter_by(id = id).first()
         if rel:
-            ignored_status = fireEvent('status.get', 'ignored', single = True)
-            available_status = fireEvent('status.get', 'available', single = True)
-            rel.status_id = available_status.get('id') if rel.status_id is ignored_status.get('id') else ignored_status.get('id')
+            ignored_status, failed_status, available_status = fireEvent('status.get', ['ignored', 'failed', 'available'], single = True)
+            rel.status_id = available_status.get('id') if rel.status_id in [ignored_status.get('id'), failed_status.get('id')] else ignored_status.get('id')
             db.commit()
 
-        return jsonified({
+        return {
             'success': True
-        })
+        }
 
-    def download(self):
+    def download(self, id = None, **kwargs):
 
         db = get_session()
-        id = getParam('id')
-        status_snatched = fireEvent('status.add', 'snatched', single = True)
+
+        snatched_status, done_status = fireEvent('status.get', ['snatched', 'done'], single = True)
 
         rel = db.query(Relea).filter_by(id = id).first()
         if rel:
@@ -168,11 +169,13 @@ class Release(Plugin):
             for info in rel.info:
                 item[info.identifier] = info.value
 
+            fireEvent('notify.frontend', type = 'release.download', data = True, message = 'Snatching "%s"' % item['name'])
+
             # Get matching provider
             provider = fireEvent('provider.belongs_to', item['url'], provider = item.get('provider'), single = True)
 
             if item['type'] != 'torrent_magnet':
-                item['download'] = provider.download
+                item['download'] = provider.loginDownload if provider.urls.get('login') else provider.download
 
             success = fireEvent('searcher.download', data = item, movie = rel.movie.to_dict({
                 'profile': {'types': {'quality': {}}},
@@ -182,15 +185,21 @@ class Release(Plugin):
             }), manual = True, single = True)
 
             if success:
-                rel.status_id = status_snatched.get('id')
-                db.commit()
+                db.expunge_all()
+                rel = db.query(Relea).filter_by(id = id).first() # Get release again
 
-            return jsonified({
+                if rel.status_id != done_status.get('id'):
+                    rel.status_id = snatched_status.get('id')
+                    db.commit()
+
+                fireEvent('notify.frontend', type = 'release.download', data = True, message = 'Successfully snatched "%s"' % item['name'])
+
+            return {
                 'success': success
-            })
+            }
         else:
             log.error('Couldn\'t find release with id: %s', id)
 
-        return jsonified({
+        return {
             'success': False
-        })
+        }

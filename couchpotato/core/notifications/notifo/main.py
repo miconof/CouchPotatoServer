@@ -1,8 +1,8 @@
 from couchpotato.core.helpers.encoding import toUnicode
 from couchpotato.core.logger import CPLog
 from couchpotato.core.notifications.base import Notification
-from flask.helpers import json
 import base64
+import json
 import traceback
 
 log = CPLog(__name__)
@@ -13,7 +13,6 @@ class Notifo(Notification):
     url = 'https://api.notifo.com/v1/send_notification'
 
     def notify(self, message = '', data = {}, listener = None):
-        if self.isDisabled(): return
 
         try:
             params = {

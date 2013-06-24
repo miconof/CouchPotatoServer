@@ -20,7 +20,6 @@ class LibraryPlugin(Plugin):
         addEvent('library.update', self.update)
         addEvent('library.update_release_date', self.updateReleaseDate)
 
-
     def add(self, attrs = {}, update_after = True):
 
         db = get_session()
@@ -38,7 +37,7 @@ class LibraryPlugin(Plugin):
 
             title = LibraryTitle(
                 title = toUnicode(attrs.get('title')),
-                simple_title = self.simplifyTitle(attrs.get('title'))
+                simple_title = self.simplifyTitle(attrs.get('title')),
             )
 
             l.titles.append(title)
@@ -53,6 +52,7 @@ class LibraryPlugin(Plugin):
 
         library_dict = l.to_dict(self.default_dict)
 
+        db.expire_all()
         return library_dict
 
     def update(self, identifier, default_title = '', force = False):
@@ -96,6 +96,7 @@ class LibraryPlugin(Plugin):
 
             titles = info.get('titles', [])
             log.debug('Adding titles: %s', titles)
+            counter = 0
             for title in titles:
                 if not title:
                     continue
@@ -103,9 +104,10 @@ class LibraryPlugin(Plugin):
                 t = LibraryTitle(
                     title = title,
                     simple_title = self.simplifyTitle(title),
-                    default = title.lower() == toUnicode(default_title.lower()) or (toUnicode(default_title) == u'' and toUnicode(titles[0]) == title)
+                    default = (len(default_title) == 0 and counter == 0) or len(titles) == 1 or title.lower() == toUnicode(default_title.lower()) or (toUnicode(default_title) == u'' and toUnicode(titles[0]) == title)
                 )
                 library.titles.append(t)
+                counter += 1
 
             db.commit()
 
@@ -130,6 +132,7 @@ class LibraryPlugin(Plugin):
 
             library_dict = library.to_dict(self.default_dict)
 
+        db.expire_all()
         return library_dict
 
     def updateReleaseDate(self, identifier):
@@ -148,6 +151,7 @@ class LibraryPlugin(Plugin):
             library.info = mergeDicts(library.info, {'release_date': dates })
             db.commit()
 
+        db.expire_all()
         return dates
 
 

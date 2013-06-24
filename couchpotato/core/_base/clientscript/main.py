@@ -1,4 +1,5 @@
 from couchpotato.core.event import addEvent
+from couchpotato.core.helpers.encoding import ss
 from couchpotato.core.helpers.variable import tryInt
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
@@ -6,6 +7,8 @@ from couchpotato.environment import Env
 from minify.cssmin import cssmin
 from minify.jsmin import jsmin
 import os
+import re
+import traceback
 
 log = CPLog(__name__)
 
@@ -22,7 +25,6 @@ class ClientScript(Plugin):
         'script': [
             'scripts/library/mootools.js',
             'scripts/library/mootools_more.js',
-            'scripts/library/prefix_free.js',
             'scripts/library/uniform.js',
             'scripts/library/form_replacement/form_check.js',
             'scripts/library/form_replacement/form_radio.js',
@@ -39,6 +41,7 @@ class ClientScript(Plugin):
             'scripts/block/navigation.js',
             'scripts/block/footer.js',
             'scripts/block/menu.js',
+            'scripts/page/home.js',
             'scripts/page/wanted.js',
             'scripts/page/settings.js',
             'scripts/page/about.js',
@@ -67,7 +70,8 @@ class ClientScript(Plugin):
         addEvent('clientscript.get_styles', self.getStyles)
         addEvent('clientscript.get_scripts', self.getScripts)
 
-        addEvent('app.load', self.minify)
+        if not Env.get('dev'):
+            addEvent('app.load', self.minify)
 
         self.addCore()
 
@@ -106,15 +110,18 @@ class ClientScript(Plugin):
             if file_type == 'script':
                 data = jsmin(f)
             else:
+                data = self.prefix(f)
                 data = cssmin(f)
                 data = data.replace('../images/', '../static/images/')
+                data = data.replace('../fonts/', '../static/fonts/')
+                data = data.replace('../../static/', '../static/') # Replace inside plugins
 
             raw.append({'file': file_path, 'date': int(os.path.getmtime(file_path)), 'data': data})
 
         # Combine all files together with some comments
         data = ''
         for r in raw:
-            data += self.comment.get(file_type) % (r.get('file'), r.get('date'))
+            data += self.comment.get(file_type) % (ss(r.get('file')), r.get('date'))
             data += r.get('data') + '\n\n'
 
         self.createFile(out, data.strip())
@@ -138,12 +145,15 @@ class ClientScript(Plugin):
         data = '' if as_html else []
 
         try:
-            if not Env.get('dev'):
-                return self.minified[type][location]
+            try:
+                if not Env.get('dev'):
+                    return self.minified[type][location]
+            except:
+                pass
 
             return self.urls[type][location]
-        except Exception, e:
-            log.error(e)
+        except:
+            log.error('Error getting minified %s, %s: %s', (type, location, traceback.format_exc()))
 
         return data
 
@@ -162,3 +172,28 @@ class ClientScript(Plugin):
         if not self.paths[type].get(location):
             self.paths[type][location] = []
         self.paths[type][location].append(file_path)
+
+    prefix_properties = ['border-radius', 'transform', 'transition', 'box-shadow']
+    prefix_tags = ['ms', 'moz', 'webkit']
+    def prefix(self, data):
+
+        trimmed_data = re.sub('(\t|\n|\r)+', '', data)
+
+        new_data = ''
+        colon_split = trimmed_data.split(';')
+        for splt in colon_split:
+            curl_split = splt.strip().split('{')
+            for curly in curl_split:
+                curly = curly.strip()
+                for prop in self.prefix_properties:
+                    if curly[:len(prop) + 1] == prop + ':':
+                        for tag in self.prefix_tags:
+                            new_data += ' -%s-%s; ' % (tag, curly)
+
+                new_data += curly + (' { ' if len(curl_split) > 1 else ' ')
+
+            new_data += '; '
+
+        new_data = new_data.replace('{ ;', '; ').replace('} ;', '} ')
+
+        return new_data

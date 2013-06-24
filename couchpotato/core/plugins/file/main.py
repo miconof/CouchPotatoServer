@@ -2,13 +2,13 @@ from couchpotato import get_session
 from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent
 from couchpotato.core.helpers.encoding import toUnicode
-from couchpotato.core.helpers.request import jsonified
 from couchpotato.core.helpers.variable import md5, getExt
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
 from couchpotato.core.plugins.scanner.main import Scanner
 from couchpotato.core.settings.model import FileType, File
 from couchpotato.environment import Env
+from tornado.web import StaticFileHandler
 import os.path
 import time
 import traceback
@@ -23,7 +23,7 @@ class FileManager(Plugin):
         addEvent('file.download', self.download)
         addEvent('file.types', self.getTypes)
 
-        addApiView('file.cache/<path:filename>', self.showCacheFile, static = True, docs = {
+        addApiView('file.cache/(.*)', self.showCacheFile, static = True, docs = {
             'desc': 'Return a file from the cp_data/cache directory',
             'params': {
                 'filename': {'desc': 'path/filename of the wanted file'}
@@ -71,7 +71,7 @@ class FileManager(Plugin):
             db = get_session()
             for root, dirs, walk_files in os.walk(Env.get('cache_dir')):
                 for filename in walk_files:
-                    if root == python_cache or 'minified' in filename: continue
+                    if root == python_cache or 'minified' in filename or 'version' in filename or 'temp_updater' in root: continue
                     file_path = os.path.join(root, filename)
                     f = db.query(File).filter(File.path == toUnicode(file_path)).first()
                     if not f:
@@ -79,13 +79,9 @@ class FileManager(Plugin):
         except:
             log.error('Failed removing unused file: %s', traceback.format_exc())
 
-    def showCacheFile(self, filename = ''):
+    def showCacheFile(self, route):
+        Env.get('app').add_handlers(".*$", [('%s%s' % (Env.get('api_base'), route), StaticFileHandler, {'path': Env.get('cache_dir')})])
 
-        cache_dir = Env.get('cache_dir')
-        filename = os.path.basename(filename)
-
-        from flask.helpers import send_from_directory
-        return send_from_directory(cache_dir, filename)
 
     def download(self, url = '', dest = None, overwrite = False, urlopen_kwargs = {}):
 
@@ -156,6 +152,6 @@ class FileManager(Plugin):
 
     def getTypesView(self):
 
-        return jsonified({
+        return {
             'types': self.getTypes()
-        })
+        }

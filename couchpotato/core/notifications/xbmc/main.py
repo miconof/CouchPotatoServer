@@ -1,8 +1,10 @@
 from couchpotato.core.helpers.variable import splitString
 from couchpotato.core.logger import CPLog
 from couchpotato.core.notifications.base import Notification
-from flask.helpers import json
+from urllib2 import URLError
 import base64
+import json
+import socket
 import traceback
 import urllib
 
@@ -13,27 +15,37 @@ class XBMC(Notification):
 
     listen_to = ['renamer.after']
     use_json_notifications = {}
-    couch_logo_url = 'https://raw.github.com/RuudBurger/CouchPotatoServer/master/couchpotato/static/images/xbmc-notify.png'
+    http_time_between_calls = 0
 
     def notify(self, message = '', data = {}, listener = None):
-        if self.isDisabled(): return
 
         hosts = splitString(self.conf('host'))
 
         successful = 0
+        max_successful = 0
         for host in hosts:
 
             if self.use_json_notifications.get(host) is None:
                 self.getXBMCJSONversion(host, message = message)
 
             if self.use_json_notifications.get(host):
-                response = self.request(host, [
-                    ('GUI.ShowNotification', {'title': self.default_title, 'message': message, 'image': self.couch_logo_url}),
-                    ('VideoLibrary.Scan', {}),
-                ])
+                calls = [
+                    ('GUI.ShowNotification', {'title': self.default_title, 'message': message, 'image': self.getNotificationImage('small')}),
+                ]
+
+                if not self.conf('only_first') or hosts.index(host) == 0:
+                    calls.append(('VideoLibrary.Scan', {}))
+
+                max_successful += len(calls)
+                response = self.request(host, calls)
             else:
                 response = self.notifyXBMCnoJSON(host, {'title':self.default_title, 'message':message})
-                response += self.request(host, [('VideoLibrary.Scan', {})])
+
+                if not self.conf('only_first') or hosts.index(host) == 0:
+                    response += self.request(host, [('VideoLibrary.Scan', {})])
+                    max_successful += 1
+
+                max_successful += 1
 
             try:
                 for result in response:
@@ -45,7 +57,7 @@ class XBMC(Notification):
             except:
                 log.error('Failed parsing results: %s', traceback.format_exc())
 
-        return successful == len(hosts) * 2
+        return successful == max_successful
 
     def getXBMCJSONversion(self, host, message = ''):
 
@@ -54,7 +66,7 @@ class XBMC(Notification):
         # XBMC JSON-RPC version request
         response = self.request(host, [
             ('JSONRPC.Version', {})
-            ])
+        ])
         for result in response:
             if (result.get('result') and type(result['result']['version']).__name__ == 'int'):
                 # only v2 and v4 return an int object
@@ -90,7 +102,7 @@ class XBMC(Notification):
                 self.use_json_notifications[host] = True
 
                 # send the text message
-                resp = self.request(host, [('GUI.ShowNotification', {'title':self.default_title, 'message':message, 'image':self.couch_logo_url})])
+                resp = self.request(host, [('GUI.ShowNotification', {'title':self.default_title, 'message':message, 'image': self.getNotificationImage('small')})])
                 for result in resp:
                     if (result.get('result') and result['result'] == 'OK'):
                         log.debug('Message delivered successfully!')
@@ -113,7 +125,7 @@ class XBMC(Notification):
         server = 'http://%s/xbmcCmds/' % host
 
         # Notification(title, message [, timeout , image])
-        cmd = "xbmcHttp?command=ExecBuiltIn(Notification(%s,%s,'',%s))" % (urllib.quote(data['title']), urllib.quote(data['message']), urllib.quote(self.couch_logo_url))
+        cmd = "xbmcHttp?command=ExecBuiltIn(Notification(%s,%s,'',%s))" % (urllib.quote(data['title']), urllib.quote(data['message']), urllib.quote(self.getNotificationImage('medium')))
         server += cmd
 
         # I have no idea what to set to, just tried text/plain and seems to be working :)
@@ -139,7 +151,7 @@ class XBMC(Notification):
             # <li>Error:<message>
             # </html>
             #
-            response = self.urlopen(server, headers = headers)
+            response = self.urlopen(server, headers = headers, timeout = 3, show_error = False)
 
             if 'OK' in response:
                 log.debug('Returned from non-JSON-type request %s: %s', (host, response))
@@ -150,6 +162,13 @@ class XBMC(Notification):
                 # manually fake expected response array
                 return [{'result': 'Error'}]
 
+        except URLError, e:
+            if isinstance(e.reason, socket.timeout):
+                log.info('Couldn\'t send request to XBMC, assuming it\'s turned off')
+                return [{'result': 'Error'}]
+            else:
+                log.error('Failed sending non-JSON-type request to XBMC: %s', traceback.format_exc())
+                return [{'result': 'Error'}]
         except:
             log.error('Failed sending non-JSON-type request to XBMC: %s', traceback.format_exc())
             return [{'result': 'Error'}]
@@ -178,11 +197,17 @@ class XBMC(Notification):
 
         try:
             log.debug('Sending request to %s: %s', (host, data))
-            rdata = self.urlopen(server, headers = headers, params = data, multipart = True)
-            response = json.loads(rdata)
+            response = self.getJsonData(server, headers = headers, params = data, timeout = 3, show_error = False)
             log.debug('Returned from request %s: %s', (host, response))
 
             return response
+        except URLError, e:
+            if isinstance(e.reason, socket.timeout):
+                log.info('Couldn\'t send request to XBMC, assuming it\'s turned off')
+                return []
+            else:
+                log.error('Failed sending request to XBMC: %s', traceback.format_exc())
+                return []
         except:
             log.error('Failed sending request to XBMC: %s', traceback.format_exc())
             return []

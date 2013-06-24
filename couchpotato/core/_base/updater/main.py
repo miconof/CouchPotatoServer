@@ -1,7 +1,6 @@
 from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent, fireEvent, fireEventAsync
 from couchpotato.core.helpers.encoding import ss
-from couchpotato.core.helpers.request import jsonified
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
 from couchpotato.environment import Env
@@ -15,6 +14,7 @@ import tarfile
 import time
 import traceback
 import version
+import zipfile
 
 log = CPLog(__name__)
 
@@ -32,11 +32,10 @@ class Updater(Plugin):
         else:
             self.updater = SourceUpdater()
 
-        fireEvent('schedule.interval', 'updater.check', self.autoUpdate, hours = 6)
-        addEvent('app.load', self.autoUpdate)
+        addEvent('app.load', self.setCrons)
         addEvent('updater.info', self.info)
 
-        addApiView('updater.info', self.getInfo, docs = {
+        addApiView('updater.info', self.info, docs = {
             'desc': 'Get updater information',
             'return': {
                 'type': 'object',
@@ -52,8 +51,17 @@ class Updater(Plugin):
             'return': {'type': 'see updater.info'}
         })
 
+        addEvent('setting.save.updater.enabled.after', self.setCrons)
+
+    def setCrons(self):
+
+        fireEvent('schedule.remove', 'updater.check', single = True)
+        if self.isEnabled():
+            fireEvent('schedule.interval', 'updater.check', self.autoUpdate, hours = 6)
+            self.autoUpdate() # Check after enabling
+
     def autoUpdate(self):
-        if self.check() and self.conf('automatic') and not self.updater.update_failed:
+        if self.isEnabled() and self.check() and self.conf('automatic') and not self.updater.update_failed:
             if self.updater.doUpdate():
 
                 # Notify before restarting
@@ -71,8 +79,8 @@ class Updater(Plugin):
 
         return False
 
-    def check(self):
-        if self.isDisabled():
+    def check(self, force = False):
+        if not force and self.isDisabled():
             return
 
         if self.updater.check():
@@ -83,17 +91,14 @@ class Updater(Plugin):
 
         return False
 
-    def info(self):
+    def info(self, **kwargs):
         return self.updater.info()
 
-    def getInfo(self):
-        return jsonified(self.updater.info())
-
     def checkView(self):
-        return jsonified({
-            'update_available': self.check(),
+        return {
+            'update_available': self.check(force = True),
             'info': self.updater.info()
-        })
+        }
 
     def doUpdateView(self):
 
@@ -110,9 +115,9 @@ class Updater(Plugin):
             if not success:
                 success = True
 
-        return jsonified({
+        return {
             'success': success
-        })
+        }
 
 
 class BaseUpdater(Plugin):
@@ -128,9 +133,6 @@ class BaseUpdater(Plugin):
 
     def doUpdate(self):
         pass
-
-    def getInfo(self):
-        return jsonified(self.info())
 
     def info(self):
         return {
@@ -255,11 +257,11 @@ class SourceUpdater(BaseUpdater):
     def doUpdate(self):
 
         try:
-            url = 'https://github.com/%s/%s/tarball/%s' % (self.repo_user, self.repo_name, self.branch)
-            destination = os.path.join(Env.get('cache_dir'), self.update_version.get('hash') + '.tar.gz')
-            extracted_path = os.path.join(Env.get('cache_dir'), 'temp_updater')
+            download_data = fireEvent('cp.source_url', repo = self.repo_user, repo_name = self.repo_name, branch = self.branch, single = True)
+            destination = os.path.join(Env.get('cache_dir'), self.update_version.get('hash')) + '.' + download_data.get('type')
 
-            destination = fireEvent('file.download', url = url, dest = destination, single = True)
+            extracted_path = os.path.join(Env.get('cache_dir'), 'temp_updater')
+            destination = fireEvent('file.download', url = download_data.get('url'), dest = destination, single = True)
 
             # Cleanup leftover from last time
             if os.path.isdir(extracted_path):
@@ -267,9 +269,15 @@ class SourceUpdater(BaseUpdater):
             self.makeDir(extracted_path)
 
             # Extract
-            tar = tarfile.open(destination)
-            tar.extractall(path = extracted_path)
-            tar.close()
+            if download_data.get('type') == 'zip':
+                zip = zipfile.ZipFile(destination)
+                zip.extractall(extracted_path)
+                zip.close()
+            else:
+                tar = tarfile.open(destination)
+                tar.extractall(path = extracted_path)
+                tar.close()
+
             os.remove(destination)
 
             if self.replaceWith(os.path.join(extracted_path, os.listdir(extracted_path)[0])):
