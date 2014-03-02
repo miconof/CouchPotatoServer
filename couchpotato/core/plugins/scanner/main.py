@@ -1,10 +1,11 @@
 from couchpotato import get_session
 from couchpotato.core.event import fireEvent, addEvent
-from couchpotato.core.helpers.encoding import toUnicode, simplifyString, ss
-from couchpotato.core.helpers.variable import getExt, getImdb, tryInt
+from couchpotato.core.helpers.encoding import toUnicode, simplifyString, ss, sp
+from couchpotato.core.helpers.variable import getExt, getImdb, tryInt, \
+    splitString
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
-from couchpotato.core.settings.model import File, Movie
+from couchpotato.core.settings.model import File, Media
 from enzyme.exceptions import NoParserError, ParseError
 from guessit import guess_movie_info
 from subliminal.videos import Video
@@ -14,17 +15,16 @@ import re
 import threading
 import time
 import traceback
+from six.moves import filter, map, zip
 
 log = CPLog(__name__)
 
 
 class Scanner(Plugin):
 
-    minimal_filesize = {
-        'media': 314572800, # 300MB
-        'trailer': 1048576, # 1MB
-    }
-    ignored_in_path = [os.path.sep + 'extracted' + os.path.sep, 'extracting', '_unpack', '_failed_', '_unknown_', '_exists_', '_failed_remove_', '_failed_rename_', '.appledouble', '.appledb', '.appledesktop', os.path.sep + '._', '.ds_store', 'cp.cpnfo'] #unpacking, smb-crap, hidden files
+    ignored_in_path = [os.path.sep + 'extracted' + os.path.sep, 'extracting', '_unpack', '_failed_', '_unknown_', '_exists_', '_failed_remove_',
+                       '_failed_rename_', '.appledouble', '.appledb', '.appledesktop', os.path.sep + '._', '.ds_store', 'cp.cpnfo',
+                       'thumbs.db', 'ehthumbs.db', 'desktop.ini']  #unpacking, smb-crap, hidden files
     ignore_names = ['extract', 'extracting', 'extracted', 'movie', 'movies', 'film', 'films', 'download', 'downloads', 'video_ts', 'audio_ts', 'bdmv', 'certificate']
     extensions = {
         'movie': ['mkv', 'wmv', 'avi', 'mpg', 'mpeg', 'mp4', 'm2ts', 'iso', 'img', 'mdf', 'ts', 'm4v'],
@@ -47,6 +47,12 @@ class Scanner(Plugin):
         'poster': ('image', 'poster'),
         'thumbnail': ('image', 'thumbnail'),
         'leftover': ('leftover', 'leftover'),
+    }
+
+    file_sizes = {  # in MB
+        'movie': {'min': 300},
+        'trailer': {'min': 2, 'max': 250},
+        'backdrop': {'min': 0, 'max': 5},
     }
 
     codecs = {
@@ -75,19 +81,20 @@ class Scanner(Plugin):
         'hdtv': ['hdtv']
     }
 
-    clean = '[ _\,\.\(\)\[\]\-](extended.cut|directors.cut|french|swedisch|danish|dutch|swesub|spanish|german|ac3|dts|custom|dc|divx|divx5|dsr|dsrip|dutch|dvd|dvdr|dvdrip|dvdscr|dvdscreener|screener|dvdivx|cam|fragment|fs|hdtv|hdrip|hdtvrip|internal|limited|multisubs|ntsc|ogg|ogm|pal|pdtv|proper|repack|rerip|retail|r3|r5|bd5|se|svcd|swedish|german|read.nfo|nfofix|unrated|ws|telesync|ts|telecine|tc|brrip|bdrip|video_ts|audio_ts|480p|480i|576p|576i|720p|720i|1080p|1080i|hrhd|hrhdtv|hddvd|bluray|x264|h264|xvid|xvidvd|xxx|www.www|cd[1-9]|\[.*\])([ _\,\.\(\)\[\]\-]|$)'
+    clean = '[ _\,\.\(\)\[\]\-]?(extended.cut|directors.cut|french|swedisch|danish|dutch|swesub|spanish|german|ac3|dts|custom|dc|divx|divx5|dsr|dsrip|dutch|dvd|dvdr|dvdrip|dvdscr|dvdscreener|screener|dvdivx|cam|fragment|fs|hdtv|hdrip' \
+            '|hdtvrip|internal|limited|multisubs|ntsc|ogg|ogm|pal|pdtv|proper|repack|rerip|retail|r3|r5|bd5|se|svcd|swedish|german|read.nfo|nfofix|unrated|ws|telesync|ts|telecine|tc|brrip|bdrip|video_ts|audio_ts|480p|480i|576p|576i|720p|720i|1080p|1080i|hrhd|hrhdtv|hddvd|bluray|x264|h264|xvid|xvidvd|xxx|www.www|cd[1-9]|\[.*\])([ _\,\.\(\)\[\]\-]|$)'
     multipart_regex = [
-        '[ _\.-]+cd[ _\.-]*([0-9a-d]+)', #*cd1
-        '[ _\.-]+dvd[ _\.-]*([0-9a-d]+)', #*dvd1
-        '[ _\.-]+part[ _\.-]*([0-9a-d]+)', #*part1
-        '[ _\.-]+dis[ck][ _\.-]*([0-9a-d]+)', #*disk1
-        'cd[ _\.-]*([0-9a-d]+)$', #cd1.ext
-        'dvd[ _\.-]*([0-9a-d]+)$', #dvd1.ext
-        'part[ _\.-]*([0-9a-d]+)$', #part1.mkv
-        'dis[ck][ _\.-]*([0-9a-d]+)$', #disk1.mkv
+        '[ _\.-]+cd[ _\.-]*([0-9a-d]+)',  #*cd1
+        '[ _\.-]+dvd[ _\.-]*([0-9a-d]+)',  #*dvd1
+        '[ _\.-]+part[ _\.-]*([0-9a-d]+)',  #*part1
+        '[ _\.-]+dis[ck][ _\.-]*([0-9a-d]+)',  #*disk1
+        'cd[ _\.-]*([0-9a-d]+)$',  #cd1.ext
+        'dvd[ _\.-]*([0-9a-d]+)$',  #dvd1.ext
+        'part[ _\.-]*([0-9a-d]+)$',  #part1.mkv
+        'dis[ck][ _\.-]*([0-9a-d]+)$',  #disk1.mkv
         '()[ _\.-]+([0-9]*[abcd]+)(\.....?)$',
         '([a-z])([0-9]+)(\.....?)$',
-        '()([ab])(\.....?)$' #*a.mkv
+        '()([ab])(\.....?)$'  #*a.mkv
     ]
 
     cp_imdb = '(.cp.(?P<id>tt[0-9{7}]+).)'
@@ -101,9 +108,9 @@ class Scanner(Plugin):
         addEvent('scanner.name_year', self.getReleaseNameYear)
         addEvent('scanner.partnumber', self.getPartNumber)
 
-    def scan(self, folder = None, files = None, download_info = None, simple = False, newer_than = 0, return_ignored = True, on_found = None):
+    def scan(self, folder = None, files = None, release_download = None, simple = False, newer_than = 0, return_ignored = True, on_found = None):
 
-        folder = ss(os.path.normpath(folder))
+        folder = sp(folder)
 
         if not folder or not os.path.isdir(folder):
             log.error('Folder doesn\'t exists: %s', folder)
@@ -119,14 +126,20 @@ class Scanner(Plugin):
             try:
                 files = []
                 for root, dirs, walk_files in os.walk(folder):
-                    files.extend(os.path.join(root, filename) for filename in walk_files)
+                    files.extend([sp(os.path.join(root, filename)) for filename in walk_files])
+
+                    # Break if CP wants to shut down
+                    if self.shuttingDown():
+                        break
+
             except:
                 log.error('Failed getting files from %s: %s', (folder, traceback.format_exc()))
+
+            log.debug('Found %s files to scan and group in %s', (len(files), folder))
         else:
             check_file_date = False
-            files = [ss(x) for x in files]
+            files = [sp(x) for x in files]
 
-        db = get_session()
 
         for file_path in files:
 
@@ -141,7 +154,7 @@ class Scanner(Plugin):
                 continue
 
             is_dvd_file = self.isDVDFile(file_path)
-            if os.path.getsize(file_path) > self.minimal_filesize['media'] or is_dvd_file: # Minimal 300MB files or is DVD file
+            if self.filesizeBetween(file_path, self.file_sizes['movie']) or is_dvd_file: # Minimal 300MB files or is DVD file
 
                 # Normal identifier
                 identifier = self.createStringIdentifier(file_path, folder, exclude_filename = is_dvd_file)
@@ -175,16 +188,15 @@ class Scanner(Plugin):
         # files will be grouped first.
         leftovers = set(sorted(leftovers, reverse = True))
 
-
         # Group files minus extension
         ignored_identifiers = []
-        for identifier, group in movie_files.iteritems():
+        for identifier, group in movie_files.items():
             if identifier not in group['identifiers'] and len(identifier) > 0: group['identifiers'].append(identifier)
 
             log.debug('Grouping files: %s', identifier)
 
             has_ignored = 0
-            for file_path in group['unsorted_files']:
+            for file_path in list(group['unsorted_files']):
                 ext = getExt(file_path)
                 wo_ext = file_path[:-(len(ext) + 1)]
                 found_files = set([i for i in leftovers if wo_ext in i])
@@ -192,6 +204,11 @@ class Scanner(Plugin):
                 leftovers = leftovers - found_files
 
                 has_ignored += 1 if ext == 'ignore' else 0
+
+            if has_ignored == 0:
+                for file_path in list(group['unsorted_files']):
+                    ext = getExt(file_path)
+                    has_ignored += 1 if ext == 'ignore' else 0
 
             if has_ignored > 0:
                 ignored_identifiers.append(identifier)
@@ -214,7 +231,7 @@ class Scanner(Plugin):
 
         # Group the files based on the identifier
         delete_identifiers = []
-        for identifier, found_files in path_identifiers.iteritems():
+        for identifier, found_files in path_identifiers.items():
             log.debug('Grouping files on identifier: %s', identifier)
 
             group = movie_files.get(identifier)
@@ -237,7 +254,7 @@ class Scanner(Plugin):
 
         # Group based on folder
         delete_identifiers = []
-        for identifier, found_files in path_identifiers.iteritems():
+        for identifier, found_files in path_identifiers.items():
             log.debug('Grouping files on foldername: %s', identifier)
 
             for ff in found_files:
@@ -249,11 +266,15 @@ class Scanner(Plugin):
                     delete_identifiers.append(identifier)
 
                     # Remove the found files from the leftover stack
-                    leftovers = leftovers - set([ff])
+                    leftovers -= leftovers - set([ff])
 
             # Break if CP wants to shut down
             if self.shuttingDown():
                 break
+
+        # leftovers should be empty
+        if leftovers:
+            log.debug('Some files are still left over: %s', leftovers)
 
         # Cleaning up used
         for identifier in delete_identifiers:
@@ -269,7 +290,7 @@ class Scanner(Plugin):
             except:
                 break
 
-            # Check if movie is fresh and maybe still unpacking, ignore files new then 1 minute
+            # Check if movie is fresh and maybe still unpacking, ignore files newer than 1 minute
             file_too_new = False
             for cur_file in group['unsorted_files']:
                 if not os.path.isfile(cur_file):
@@ -321,14 +342,18 @@ class Scanner(Plugin):
 
         del movie_files
 
+        total_found = len(valid_files)
+
         # Make sure only one movie was found if a download ID is provided
-        if download_info and not len(valid_files) == 1:
-            log.info('Download ID provided (%s), but more than one group found (%s). Ignoring Download ID...', (download_info.get('imdb_id'), len(valid_files)))
-            download_info = None
+        if release_download and total_found == 0:
+            log.info('Download ID provided (%s), but no groups found! Make sure the download contains valid media files (fully extracted).', release_download.get('imdb_id'))
+        elif release_download and total_found > 1:
+            log.info('Download ID provided (%s), but more than one group found (%s). Ignoring Download ID...', (release_download.get('imdb_id'), len(valid_files)))
+            release_download = None
 
         # Determine file types
+        db = get_session()
         processed_movies = {}
-        total_found = len(valid_files)
         while True and not self.shuttingDown():
             try:
                 identifier, group = valid_files.popitem()
@@ -360,7 +385,7 @@ class Scanner(Plugin):
                 continue
 
             log.debug('Getting metadata for %s', identifier)
-            group['meta_data'] = self.getMetaData(group, folder = folder, download_info = download_info)
+            group['meta_data'] = self.getMetaData(group, folder = folder, release_download = release_download)
 
             # Subtitle meta
             group['subtitle_language'] = self.getSubtitleLanguage(group) if not simple else {}
@@ -392,12 +417,13 @@ class Scanner(Plugin):
             del group['unsorted_files']
 
             # Determine movie
-            group['library'] = self.determineMovie(group, download_info = download_info)
+            group['library'] = self.determineMovie(group, release_download = release_download)
             if not group['library']:
                 log.error('Unable to determine movie: %s', group['identifiers'])
             else:
-                movie = db.query(Movie).filter_by(library_id = group['library']['id']).first()
+                movie = db.query(Media).filter_by(library_id = group['library']['id']).first()
                 group['movie_id'] = None if not movie else movie.id
+                db.expire_all()
 
             processed_movies[identifier] = group
 
@@ -413,17 +439,17 @@ class Scanner(Plugin):
         if len(processed_movies) > 0:
             log.info('Found %s movies in the folder %s', (len(processed_movies), folder))
         else:
-            log.debug('Found no movies in the folder %s', (folder))
+            log.debug('Found no movies in the folder %s', folder)
 
         return processed_movies
 
-    def getMetaData(self, group, folder = '', download_info = None):
+    def getMetaData(self, group, folder = '', release_download = None):
 
         data = {}
         files = list(group['files']['movie'])
 
         for cur_file in files:
-            if os.path.getsize(cur_file) < self.minimal_filesize['media']: continue # Ignore smaller files
+            if not self.filesizeBetween(cur_file, self.file_sizes['movie']): continue  # Ignore smaller files
 
             meta = self.getMeta(cur_file)
 
@@ -433,7 +459,7 @@ class Scanner(Plugin):
                 data['resolution_width'] = meta.get('resolution_width', 720)
                 data['resolution_height'] = meta.get('resolution_height', 480)
                 data['audio_channels'] = meta.get('audio_channels', 2.0)
-                data['aspect'] = meta.get('resolution_width', 720) / meta.get('resolution_height', 480)
+                data['aspect'] = round(float(meta.get('resolution_width', 720)) / meta.get('resolution_height', 480), 2)
             except:
                 log.debug('Error parsing metadata: %s %s', (cur_file, traceback.format_exc()))
                 pass
@@ -442,8 +468,8 @@ class Scanner(Plugin):
 
         # Use the quality guess first, if that failes use the quality we wanted to download
         data['quality'] = None
-        if download_info and download_info.get('quality'):
-            data['quality'] = fireEvent('quality.single', download_info.get('quality'), single = True)
+        if release_download and release_download.get('quality'):
+            data['quality'] = fireEvent('quality.single', release_download.get('quality'), single = True)
 
         if not data['quality']:
             data['quality'] = fireEvent('quality.guess', files = files, extra = data, single = True)
@@ -492,6 +518,7 @@ class Scanner(Plugin):
         detected_languages = {}
 
         # Subliminal scanner
+        paths = None
         try:
             paths = group['files']['movie']
             scan_result = []
@@ -526,12 +553,12 @@ class Scanner(Plugin):
 
         return detected_languages
 
-    def determineMovie(self, group, download_info = None):
+    def determineMovie(self, group, release_download = None):
 
         # Get imdb id from downloader
-        imdb_id = download_info and download_info.get('imdb_id')
+        imdb_id = release_download and release_download.get('imdb_id')
         if imdb_id:
-            log.debug('Found movie via imdb id from it\'s download id: %s', download_info.get('imdb_id'))
+            log.debug('Found movie via imdb id from it\'s download id: %s', release_download.get('imdb_id'))
 
         files = group['files']
 
@@ -544,12 +571,14 @@ class Scanner(Plugin):
                     break
 
         # Check and see if nfo contains the imdb-id
+        nfo_file = None
         if not imdb_id:
             try:
-                for nfo_file in files['nfo']:
-                    imdb_id = getImdb(nfo_file)
+                for nf in files['nfo']:
+                    imdb_id = getImdb(nf, check_inside = True)
                     if imdb_id:
-                        log.debug('Found movie via nfo file: %s', nfo_file)
+                        log.debug('Found movie via nfo file: %s', nf)
+                        nfo_file = nf
                         break
             except:
                 pass
@@ -559,7 +588,7 @@ class Scanner(Plugin):
             try:
                 for filetype in files:
                     for filetype_file in files[filetype]:
-                        imdb_id = getImdb(filetype_file, check_inside = False)
+                        imdb_id = getImdb(filetype_file)
                         if imdb_id:
                             log.debug('Found movie via imdb in filename: %s', nfo_file)
                             break
@@ -568,26 +597,17 @@ class Scanner(Plugin):
 
         # Check if path is already in db
         if not imdb_id:
+
             db = get_session()
-            for cur_file in files['movie']:
-                f = db.query(File).filter_by(path = toUnicode(cur_file)).first()
+            for cf in files['movie']:
+                f = db.query(File).filter_by(path = toUnicode(cf)).first()
                 try:
                     imdb_id = f.library[0].identifier
-                    log.debug('Found movie via database: %s', cur_file)
+                    log.debug('Found movie via database: %s', cf)
+                    cur_file = cf
                     break
                 except:
                     pass
-
-        # Search based on OpenSubtitleHash
-        if not imdb_id and not group['is_dvd']:
-            for cur_file in files['movie']:
-                movie = fireEvent('movie.by_hash', file = cur_file, merge = True)
-
-                if len(movie) > 0:
-                    imdb_id = movie[0].get('imdb')
-                    if imdb_id:
-                        log.debug('Found movie via OpenSubtitleHash: %s', cur_file)
-                        break
 
         # Search based on identifiers
         if not imdb_id:
@@ -609,7 +629,7 @@ class Scanner(Plugin):
                     log.debug('Identifier to short to use for search: %s', identifier)
 
         if imdb_id:
-            return fireEvent('library.add', attrs = {
+            return fireEvent('library.add.movie', attrs = {
                 'identifier': imdb_id
             }, update_after = False, single = True)
 
@@ -621,7 +641,7 @@ class Scanner(Plugin):
         try:
             m = re.search(self.cp_imdb, string.lower())
             id = m.group('id')
-            if id:  return id
+            if id: return id
         except AttributeError:
             pass
 
@@ -640,7 +660,7 @@ class Scanner(Plugin):
     def getMediaFiles(self, files):
 
         def test(s):
-            return self.filesizeBetween(s, 300, 100000) and getExt(s.lower()) in self.extensions['movie'] and not self.isSampleFile(s)
+            return self.filesizeBetween(s, self.file_sizes['movie']) and getExt(s.lower()) in self.extensions['movie'] and not self.isSampleFile(s)
 
         return set(filter(test, files))
 
@@ -665,7 +685,7 @@ class Scanner(Plugin):
     def getTrailers(self, files):
 
         def test(s):
-            return re.search('(^|[\W_])trailer\d*[\W_]', s.lower()) and self.filesizeBetween(s, 2, 250)
+            return re.search('(^|[\W_])trailer\d*[\W_]', s.lower()) and self.filesizeBetween(s, self.file_sizes['trailer'])
 
         return set(filter(test, files))
 
@@ -675,10 +695,9 @@ class Scanner(Plugin):
             return getExt(s.lower()) in ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tbn']
         files = set(filter(test, files))
 
-        images = {}
-
-        # Fanart
-        images['backdrop'] = set(filter(lambda s: re.search('(^|[\W_])fanart|backdrop\d*[\W_]', s.lower()) and self.filesizeBetween(s, 0, 5), files))
+        images = {
+            'backdrop': set(filter(lambda s: re.search('(^|[\W_])fanart|backdrop\d*[\W_]', s.lower()) and self.filesizeBetween(s, self.file_sizes['backdrop']), files))
+        }
 
         # Rest
         images['rest'] = files - images['backdrop']
@@ -705,16 +724,6 @@ class Scanner(Plugin):
                 log.debug('Ignored "%s" contains "%s".', (filename, i))
                 return False
 
-        # Sample file
-        if self.isSampleFile(filename):
-            log.debug('Is sample file "%s".', filename)
-            return False
-
-        # Minimal size
-        if self.filesizeBetween(filename, self.minimal_filesize['media']):
-            log.debug('File to small: %s', filename)
-            return False
-
         # All is OK
         return True
 
@@ -723,9 +732,11 @@ class Scanner(Plugin):
         if is_sample: log.debug('Is sample file: %s', filename)
         return is_sample
 
-    def filesizeBetween(self, file, min = 0, max = 100000):
+    def filesizeBetween(self, file, file_size = None):
+        if not file_size: file_size = []
+
         try:
-            return (min * 1048576) < os.path.getsize(file) < (max * 1048576)
+            return (file_size.get('min', 0) * 1048576) < os.path.getsize(file) < (file_size.get('max', 100000) * 1048576)
         except:
             log.error('Couldn\'t get filesize of %s.', file)
 
@@ -733,8 +744,15 @@ class Scanner(Plugin):
 
     def createStringIdentifier(self, file_path, folder = '', exclude_filename = False):
 
-        identifier = file_path.replace(folder, '') # root folder
+        year = self.findYear(file_path)
+
+        identifier = file_path.replace(folder, '').lstrip(os.path.sep) # root folder
         identifier = os.path.splitext(identifier)[0] # ext
+
+        try:
+            path_split = splitString(identifier, os.path.sep)
+            identifier = path_split[-2] if len(path_split) > 1 and len(path_split[-2]) > len(path_split[-1]) else path_split[-1] # Only get filename
+        except: pass
 
         if exclude_filename:
             identifier = identifier[:len(identifier) - len(os.path.split(identifier)[-1])]
@@ -749,9 +767,9 @@ class Scanner(Plugin):
         identifier = re.sub(self.clean, '::', simplifyString(identifier)).strip(':')
 
         # Year
-        year = self.findYear(identifier)
-        if year:
-            identifier = '%s %s' % (identifier.split(year)[0].strip(), year)
+        if year and identifier[:4] != year:
+            split_by = ':::' if ':::' in identifier else year
+            identifier = '%s %s' % (identifier.split(split_by)[0].strip(), year)
         else:
             identifier = identifier.split('::')[0]
 
@@ -811,23 +829,32 @@ class Scanner(Plugin):
         return None
 
     def findYear(self, text):
-        matches = re.search('(?P<year>19[0-9]{2}|20[0-9]{2})', text)
+
+        # Search year inside () or [] first
+        matches = re.findall('(\(|\[)(?P<year>19[0-9]{2}|20[0-9]{2})(\]|\))', text)
         if matches:
-            return matches.group('year')
+            return matches[-1][1]
+
+        # Search normal
+        matches = re.findall('(?P<year>19[0-9]{2}|20[0-9]{2})', text)
+        if matches:
+            return matches[-1]
 
         return ''
 
     def getReleaseNameYear(self, release_name, file_name = None):
 
+        release_name = release_name.strip(' .-_')
+
         # Use guessit first
         guess = {}
         if file_name:
             try:
-                guess = guess_movie_info(toUnicode(file_name))
-                if guess.get('title') and guess.get('year'):
+                guessit = guess_movie_info(toUnicode(file_name))
+                if guessit.get('title') and guessit.get('year'):
                     guess = {
-                        'name': guess.get('title'),
-                        'year': guess.get('year'),
+                        'name': guessit.get('title'),
+                        'year': guessit.get('year'),
                     }
             except:
                 log.debug('Could not detect via guessit "%s": %s', (file_name, traceback.format_exc()))
@@ -835,24 +862,32 @@ class Scanner(Plugin):
         # Backup to simple
         cleaned = ' '.join(re.split('\W+', simplifyString(release_name)))
         cleaned = re.sub(self.clean, ' ', cleaned)
-        year = self.findYear(cleaned)
+
+        for year_str in [file_name, release_name, cleaned]:
+            if not year_str: continue
+            year = self.findYear(year_str)
+            if year:
+                break
+
         cp_guess = {}
 
         if year: # Split name on year
             try:
-                movie_name = cleaned.split(year).pop(0).strip()
-                cp_guess = {
-                    'name': movie_name,
-                    'year': int(year),
-                }
+                movie_name = cleaned.rsplit(year, 1).pop(0).strip()
+                if movie_name:
+                    cp_guess = {
+                        'name': movie_name,
+                        'year': int(year),
+                    }
             except:
                 pass
-        else: # Split name on multiple spaces
+
+        if not cp_guess:  # Split name on multiple spaces
             try:
                 movie_name = cleaned.split('  ').pop(0).strip()
                 cp_guess = {
                     'name': movie_name,
-                    'year': int(year),
+                    'year': int(year) if movie_name[:4] != year else 0,
                 }
             except:
                 pass

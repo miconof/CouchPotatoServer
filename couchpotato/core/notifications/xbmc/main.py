@@ -1,23 +1,25 @@
 from couchpotato.core.helpers.variable import splitString
 from couchpotato.core.logger import CPLog
 from couchpotato.core.notifications.base import Notification
-from urllib2 import URLError
 import base64
 import json
 import socket
 import traceback
 import urllib
+import requests
+from requests.packages.urllib3.exceptions import MaxRetryError
 
 log = CPLog(__name__)
 
 
 class XBMC(Notification):
 
-    listen_to = ['renamer.after']
+    listen_to = ['renamer.after', 'movie.snatched']
     use_json_notifications = {}
     http_time_between_calls = 0
 
-    def notify(self, message = '', data = {}, listener = None):
+    def notify(self, message = '', data = None, listener = None):
+        if not data: data = {}
 
         hosts = splitString(self.conf('host'))
 
@@ -33,15 +35,19 @@ class XBMC(Notification):
                     ('GUI.ShowNotification', {'title': self.default_title, 'message': message, 'image': self.getNotificationImage('small')}),
                 ]
 
-                if not self.conf('only_first') or hosts.index(host) == 0:
-                    calls.append(('VideoLibrary.Scan', {}))
+                if data and data.get('destination_dir') and (not self.conf('only_first') or hosts.index(host) == 0):
+                    param = {}
+                    if not self.conf('force_full_scan') and (self.conf('remote_dir_scan') or socket.getfqdn('localhost') == socket.getfqdn(host.split(':')[0])):
+                        param = {'directory': data['destination_dir']}
+
+                    calls.append(('VideoLibrary.Scan', param))
 
                 max_successful += len(calls)
                 response = self.request(host, calls)
             else:
-                response = self.notifyXBMCnoJSON(host, {'title':self.default_title, 'message':message})
+                response = self.notifyXBMCnoJSON(host, {'title': self.default_title, 'message': message})
 
-                if not self.conf('only_first') or hosts.index(host) == 0:
+                if data and data.get('destination_dir') and (not self.conf('only_first') or hosts.index(host) == 0):
                     response += self.request(host, [('VideoLibrary.Scan', {})])
                     max_successful += 1
 
@@ -49,9 +55,9 @@ class XBMC(Notification):
 
             try:
                 for result in response:
-                    if (result.get('result') and result['result'] == 'OK'):
+                    if result.get('result') and result['result'] == 'OK':
                         successful += 1
-                    elif (result.get('error')):
+                    elif result.get('error'):
                         log.error('XBMC error; %s: %s (%s)', (result['id'], result['error']['message'], result['error']['code']))
 
             except:
@@ -68,7 +74,7 @@ class XBMC(Notification):
             ('JSONRPC.Version', {})
         ])
         for result in response:
-            if (result.get('result') and type(result['result']['version']).__name__ == 'int'):
+            if result.get('result') and type(result['result']['version']).__name__ == 'int':
                 # only v2 and v4 return an int object
                 # v6 (as of XBMC v12(Frodo)) is required to send notifications
                 xbmc_rpc_version = str(result['result']['version'])
@@ -81,15 +87,15 @@ class XBMC(Notification):
                 # send the text message
                 resp = self.notifyXBMCnoJSON(host, {'title':self.default_title, 'message':message})
                 for result in resp:
-                    if (result.get('result') and result['result'] == 'OK'):
+                    if result.get('result') and result['result'] == 'OK':
                         log.debug('Message delivered successfully!')
                         success = True
                         break
-                    elif (result.get('error')):
+                    elif result.get('error'):
                         log.error('XBMC error; %s: %s (%s)', (result['id'], result['error']['message'], result['error']['code']))
                         break
 
-            elif (result.get('result') and type(result['result']['version']).__name__ == 'dict'):
+            elif result.get('result') and type(result['result']['version']).__name__ == 'dict':
                 # XBMC JSON-RPC v6 returns an array object containing
                 # major, minor and patch number
                 xbmc_rpc_version = str(result['result']['version']['major'])
@@ -104,16 +110,16 @@ class XBMC(Notification):
                 # send the text message
                 resp = self.request(host, [('GUI.ShowNotification', {'title':self.default_title, 'message':message, 'image': self.getNotificationImage('small')})])
                 for result in resp:
-                    if (result.get('result') and result['result'] == 'OK'):
+                    if result.get('result') and result['result'] == 'OK':
                         log.debug('Message delivered successfully!')
                         success = True
                         break
-                    elif (result.get('error')):
+                    elif result.get('error'):
                         log.error('XBMC error; %s: %s (%s)', (result['id'], result['error']['message'], result['error']['code']))
                         break
 
             # error getting version info (we do have contact with XBMC though)
-            elif (result.get('error')):
+            elif result.get('error'):
                 log.error('XBMC error; %s: %s (%s)', (result['id'], result['error']['message'], result['error']['code']))
 
         log.debug('Use JSON notifications: %s ', self.use_json_notifications)
@@ -162,22 +168,18 @@ class XBMC(Notification):
                 # manually fake expected response array
                 return [{'result': 'Error'}]
 
-        except URLError, e:
-            if isinstance(e.reason, socket.timeout):
-                log.info('Couldn\'t send request to XBMC, assuming it\'s turned off')
-                return [{'result': 'Error'}]
-            else:
-                log.error('Failed sending non-JSON-type request to XBMC: %s', traceback.format_exc())
-                return [{'result': 'Error'}]
+        except (MaxRetryError, requests.exceptions.Timeout):
+            log.info2('Couldn\'t send request to XBMC, assuming it\'s turned off')
+            return [{'result': 'Error'}]
         except:
             log.error('Failed sending non-JSON-type request to XBMC: %s', traceback.format_exc())
             return [{'result': 'Error'}]
 
-    def request(self, host, requests):
+    def request(self, host, do_requests):
         server = 'http://%s/jsonrpc' % host
 
         data = []
-        for req in requests:
+        for req in do_requests:
             method, kwargs = req
             data.append({
                 'method': method,
@@ -197,17 +199,13 @@ class XBMC(Notification):
 
         try:
             log.debug('Sending request to %s: %s', (host, data))
-            response = self.getJsonData(server, headers = headers, params = data, timeout = 3, show_error = False)
+            response = self.getJsonData(server, headers = headers, data = data, timeout = 3, show_error = False)
             log.debug('Returned from request %s: %s', (host, response))
 
             return response
-        except URLError, e:
-            if isinstance(e.reason, socket.timeout):
-                log.info('Couldn\'t send request to XBMC, assuming it\'s turned off')
-                return []
-            else:
-                log.error('Failed sending request to XBMC: %s', traceback.format_exc())
-                return []
+        except (MaxRetryError, requests.exceptions.Timeout):
+            log.info2('Couldn\'t send request to XBMC, assuming it\'s turned off')
+            return []
         except:
             log.error('Failed sending request to XBMC: %s', traceback.format_exc())
             return []

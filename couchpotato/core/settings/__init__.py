@@ -1,13 +1,11 @@
 from __future__ import with_statement
+import traceback
 from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent, fireEvent
-from couchpotato.core.helpers.encoding import isInt, toUnicode
-from couchpotato.core.helpers.variable import mergeDicts, tryInt
+from couchpotato.core.helpers.encoding import toUnicode
+from couchpotato.core.helpers.variable import mergeDicts, tryInt, tryFloat
 from couchpotato.core.settings.model import Properties
 import ConfigParser
-import os.path
-import time
-import traceback
 
 
 class Settings(object):
@@ -75,16 +73,26 @@ class Settings(object):
         addEvent('settings.register', self.registerDefaults)
         addEvent('settings.save', self.save)
 
-    def registerDefaults(self, section_name, options = {}, save = True):
+    def registerDefaults(self, section_name, options = None, save = True):
+        if not options: options = {}
+
         self.addSection(section_name)
-        for option_name, option in options.iteritems():
+
+        for option_name, option in options.items():
             self.setDefault(section_name, option_name, option.get('default', ''))
+
+            # Migrate old settings from old location to the new location
+            if option.get('migrate_from'):
+                if self.p.has_option(option.get('migrate_from'), option_name):
+                    previous_value = self.p.get(option.get('migrate_from'), option_name)
+                    self.p.set(section_name, option_name, previous_value)
+                    self.p.remove_option(option.get('migrate_from'), option_name)
 
             if option.get('type'):
                 self.setType(section_name, option_name, option.get('type'))
 
         if save:
-            self.save(self)
+            self.save()
 
     def set(self, section, option, value):
         return self.p.set(section, option, value)
@@ -102,6 +110,10 @@ class Settings(object):
 
         except:
             return default
+
+    def delete(self, option = '', section = 'core'):
+        self.p.remove_option(section, option)
+        self.save()
 
     def getEnabler(self, section, option):
         return self.getBool(section, option)
@@ -122,7 +134,7 @@ class Settings(object):
         try:
             return self.p.getfloat(section, option)
         except:
-            return tryInt(self.p.get(section, option))
+            return tryFloat(self.p.get(section, option))
 
     def getUnicode(self, section, option):
         value = self.p.get(section, option).decode('unicode_escape')
@@ -168,7 +180,7 @@ class Settings(object):
         return self.options
 
 
-    def view(self):
+    def view(self, **kwargs):
         return {
             'options': self.getOptions(),
             'values': self.getValues()
@@ -188,6 +200,7 @@ class Settings(object):
 
         # After save (for re-interval etc)
         fireEvent('setting.save.%s.%s.after' % (section, option), single = True)
+        fireEvent('setting.save.%s.*.after' % section, single = True)
 
         return {
             'success': True,
@@ -209,14 +222,20 @@ class Settings(object):
     def setProperty(self, identifier, value = ''):
         from couchpotato import get_session
 
-        db = get_session()
+        try:
+            db = get_session()
 
-        p = db.query(Properties).filter_by(identifier = identifier).first()
-        if not p:
-            p = Properties()
-            db.add(p)
+            p = db.query(Properties).filter_by(identifier = identifier).first()
+            if not p:
+                p = Properties()
+                db.add(p)
 
-        p.identifier = identifier
-        p.value = toUnicode(value)
+            p.identifier = identifier
+            p.value = toUnicode(value)
 
-        db.commit()
+            db.commit()
+        except:
+            self.log.error('Failed: %s', traceback.format_exc())
+            db.rollback()
+        finally:
+            db.close()

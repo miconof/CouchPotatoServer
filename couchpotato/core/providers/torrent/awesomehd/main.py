@@ -11,10 +11,10 @@ log = CPLog(__name__)
 class AwesomeHD(TorrentProvider):
 
     urls = {
-        'test' : 'https://awesome-hd.net/',
-        'detail' : 'https://awesome-hd.net/torrents.php?torrentid=%s',
-        'search' : 'https://awesome-hd.net/searchapi.php?action=imdbsearch&passkey=%s&imdb=%s&internal=%s',
-        'download' : 'https://awesome-hd.net/torrents.php?action=download&id=%s&authkey=%s&torrent_pass=%s',
+        'test': 'https://awesome-hd.net/',
+        'detail': 'https://awesome-hd.net/torrents.php?torrentid=%s',
+        'search': 'https://awesome-hd.net/searchapi.php?action=imdbsearch&passkey=%s&imdb=%s&internal=%s',
+        'download': 'https://awesome-hd.net/torrents.php?action=download&id=%s&authkey=%s&torrent_pass=%s',
     }
     http_time_between_calls = 1
 
@@ -25,6 +25,11 @@ class AwesomeHD(TorrentProvider):
         if data:
             try:
                 soup = BeautifulSoup(data)
+
+                if soup.find('error'):
+                    log.error(soup.find('error').get_text())
+                    return
+
                 authkey = soup.find('authkey').get_text()
                 entries = soup.find_all('torrent')
 

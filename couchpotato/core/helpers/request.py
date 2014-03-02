@@ -8,8 +8,8 @@ def getParams(params):
 
     reg = re.compile('^[a-z0-9_\.]+$')
 
-    current = temp = {}
-    for param, value in sorted(params.iteritems()):
+    temp = {}
+    for param, value in sorted(params.items()):
 
         nest = re.split("([\[\]]+)", param)
         if len(nest) > 1:
@@ -32,16 +32,22 @@ def getParams(params):
                     current = current[item]
         else:
             temp[param] = toUnicode(unquote(value))
+            if temp[param].lower() in ['true', 'false']:
+                temp[param] = temp[param].lower() != 'false'
 
     return dictToList(temp)
+
 
 def dictToList(params):
 
     if type(params) is dict:
         new = {}
-        for x, value in params.iteritems():
+        for x, value in params.items():
             try:
-                new_value = [dictToList(value[k]) for k in sorted(value.iterkeys(), cmp = natcmp)]
+                convert = lambda text: int(text) if text.isdigit() else text.lower()
+                alphanum_key = lambda key: [convert(c) for c in re.split('([0-9]+)', key)]
+                sorted_keys = sorted(value.keys(), key = alphanum_key)
+                new_value = [dictToList(value[k]) for k in sorted_keys]
             except:
                 new_value = value
 

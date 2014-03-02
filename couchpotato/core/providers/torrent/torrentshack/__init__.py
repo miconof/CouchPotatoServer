@@ -1,5 +1,6 @@
 from .main import TorrentShack
 
+
 def start():
     return TorrentShack()
 
@@ -8,10 +9,9 @@ config = [{
     'groups': [
         {
             'tab': 'searcher',
-            'subtab': 'providers',
             'list': 'torrent_providers',
             'name': 'TorrentShack',
-            'description': 'See <a href="http://www.torrentshack.net/">TorrentShack</a>',
+            'description': 'See <a href="https://www.torrentshack.net/">TorrentShack</a>',
             'options': [
                 {
                     'name': 'enabled',
@@ -26,6 +26,20 @@ config = [{
                     'name': 'password',
                     'default': '',
                     'type': 'password',
+                },
+                {
+                    'name': 'seed_ratio',
+                    'label': 'Seed ratio',
+                    'type': 'float',
+                    'default': 1,
+                    'description': 'Will not be (re)moved until this seed ratio is met.',
+                },
+                {
+                    'name': 'seed_time',
+                    'label': 'Seed time',
+                    'type': 'int',
+                    'default': 40,
+                    'description': 'Will not be (re)moved until this seed time (in hours) is met.',
                 },
                 {
                     'name': 'scene_only',

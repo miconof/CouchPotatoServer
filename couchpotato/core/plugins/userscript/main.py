@@ -13,7 +13,7 @@ log = CPLog(__name__)
 
 class Userscript(Plugin):
 
-    version = 3
+    version = 4
 
     def __init__(self):
         addApiView('userscript.get/(.*)/(.*)', self.getUserScript, static = True)
@@ -35,14 +35,14 @@ class Userscript(Plugin):
 
         return self.renderTemplate(__file__, 'bookmark.js', **params)
 
-    def getIncludes(self):
+    def getIncludes(self, **kwargs):
 
         return {
             'includes': fireEvent('userscript.get_includes', merge = True),
             'excludes': fireEvent('userscript.get_excludes', merge = True),
         }
 
-    def getUserScript(self, route):
+    def getUserScript(self, script_route, **kwargs):
 
         klass = self
 
@@ -55,7 +55,7 @@ class Userscript(Plugin):
                     'excludes': fireEvent('userscript.get_excludes', merge = True),
                     'version': klass.getVersion(),
                     'api': '%suserscript/' % Env.get('api_base'),
-                    'host': '%s://%s' % (self.request.protocol, self.request.host),
+                    'host': '%s://%s' % (self.request.protocol, self.request.headers.get('X-Forwarded-Host') or self.request.headers.get('host')),
                 }
 
                 script = klass.renderTemplate(__file__, 'template.js', **params)
@@ -63,8 +63,7 @@ class Userscript(Plugin):
 
                 self.redirect(Env.get('api_base') + 'file.cache/couchpotato.user.js')
 
-        Env.get('app').add_handlers(".*$", [('%s%s' % (Env.get('api_base'), route), UserscriptHandler)])
-
+        Env.get('app').add_handlers(".*$", [('%s%s' % (Env.get('api_base'), script_route), UserscriptHandler)])
 
     def getVersion(self):
 
@@ -80,8 +79,6 @@ class Userscript(Plugin):
         return index()
 
     def getViaUrl(self, url = None, **kwargs):
-
-        print url
 
         params = {
             'url': url,

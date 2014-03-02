@@ -15,6 +15,7 @@ import time
 import traceback
 import version
 import zipfile
+from six.moves import filter
 
 log = CPLog(__name__)
 
@@ -32,6 +33,7 @@ class Updater(Plugin):
         else:
             self.updater = SourceUpdater()
 
+        addEvent('app.load', self.logVersion, priority = 10000)
         addEvent('app.load', self.setCrons)
         addEvent('updater.info', self.info)
 
@@ -53,12 +55,16 @@ class Updater(Plugin):
 
         addEvent('setting.save.updater.enabled.after', self.setCrons)
 
+    def logVersion(self):
+        info = self.info()
+        log.info('=== VERSION %s, using %s ===', (info.get('version', {}).get('repr', 'UNKNOWN'), self.updater.getName()))
+
     def setCrons(self):
 
         fireEvent('schedule.remove', 'updater.check', single = True)
         if self.isEnabled():
             fireEvent('schedule.interval', 'updater.check', self.autoUpdate, hours = 6)
-            self.autoUpdate() # Check after enabling
+            self.autoUpdate()  # Check after enabling
 
     def autoUpdate(self):
         if self.isEnabled() and self.check() and self.conf('automatic') and not self.updater.update_failed:
@@ -85,7 +91,9 @@ class Updater(Plugin):
 
         if self.updater.check():
             if not self.available_notified and self.conf('notification') and not self.conf('automatic'):
-                fireEvent('updater.available', message = 'A new update is available', data = self.updater.info())
+                info = self.updater.info()
+                version_date = datetime.fromtimestamp(info['update_version']['date'])
+                fireEvent('updater.available', message = 'A new update with hash "%s" is available, this version is from %s' % (info['update_version']['hash'], version_date), data = info)
                 self.available_notified = True
             return True
 
@@ -94,13 +102,13 @@ class Updater(Plugin):
     def info(self, **kwargs):
         return self.updater.info()
 
-    def checkView(self):
+    def checkView(self, **kwargs):
         return {
             'update_available': self.check(force = True),
             'info': self.updater.info()
         }
 
-    def doUpdateView(self):
+    def doUpdateView(self, **kwargs):
 
         self.check()
         if not self.updater.update_version:
@@ -130,6 +138,7 @@ class BaseUpdater(Plugin):
     update_failed = False
     update_version = None
     last_check = 0
+    auto_register_static = False
 
     def doUpdate(self):
         pass
@@ -142,6 +151,9 @@ class BaseUpdater(Plugin):
             'repo_name': '%s/%s' % (self.repo_user, self.repo_name),
             'branch': self.branch,
         }
+
+    def getVersion(self):
+        pass
 
     def check(self):
         pass
@@ -171,7 +183,6 @@ class BaseUpdater(Plugin):
                         log.error('Couldn\'t remove empty directory %s: %s', (full_path, traceback.format_exc()))
 
 
-
 class GitUpdater(BaseUpdater):
 
     def __init__(self, git_command):
@@ -180,9 +191,6 @@ class GitUpdater(BaseUpdater):
     def doUpdate(self):
 
         try:
-            log.debug('Stashing local changes')
-            self.repo.saveStash()
-
             log.info('Updating to latest version')
             self.repo.pull()
 
@@ -201,14 +209,15 @@ class GitUpdater(BaseUpdater):
 
         if not self.version:
             try:
-                output = self.repo.getHead() # Yes, please
+                output = self.repo.getHead()  # Yes, please
                 log.debug('Git version output: %s', output.hash)
                 self.version = {
+                    'repr': 'git:(%s:%s % s) %s (%s)' % (self.repo_user, self.repo_name, self.branch, output.hash[:8], datetime.fromtimestamp(output.getDate())),
                     'hash': output.hash[:8],
                     'date': output.getDate(),
                     'type': 'git',
                 }
-            except Exception, e:
+            except Exception as e:
                 log.error('Failed using GIT updater, running from source, you need to have GIT installed. %s', e)
                 return 'No GIT'
 
@@ -231,7 +240,7 @@ class GitUpdater(BaseUpdater):
                 local = self.repo.getHead()
                 remote = branch.getHead()
 
-                log.info('Versions, local:%s, remote:%s', (local.hash[:8], remote.hash[:8]))
+                log.debug('Versions, local:%s, remote:%s', (local.hash[:8], remote.hash[:8]))
 
                 if local.getDate() < remote.getDate():
                     self.update_version = {
@@ -242,7 +251,6 @@ class GitUpdater(BaseUpdater):
 
         self.last_check = time.time()
         return False
-
 
 
 class SourceUpdater(BaseUpdater):
@@ -270,9 +278,9 @@ class SourceUpdater(BaseUpdater):
 
             # Extract
             if download_data.get('type') == 'zip':
-                zip = zipfile.ZipFile(destination)
-                zip.extractall(extracted_path)
-                zip.close()
+                zip_file = zipfile.ZipFile(destination)
+                zip_file.extractall(extracted_path)
+                zip_file.close()
             else:
                 tar = tarfile.open(destination)
                 tar.extractall(path = extracted_path)
@@ -295,6 +303,7 @@ class SourceUpdater(BaseUpdater):
 
     def replaceWith(self, path):
         app_dir = ss(Env.get('app_dir'))
+        data_dir = ss(Env.get('data_dir'))
 
         # Get list of files we want to overwrite
         self.deletePyc()
@@ -326,22 +335,24 @@ class SourceUpdater(BaseUpdater):
                         log.error('Failed overwriting file "%s": %s', (tofile, traceback.format_exc()))
                         return False
 
-        if Env.get('app_dir') not in Env.get('data_dir'):
-            for still_exists in existing_files:
-                try:
-                    os.remove(still_exists)
-                except:
-                    log.error('Failed removing non-used file: %s', traceback.format_exc())
+        for still_exists in existing_files:
+
+            if data_dir in still_exists:
+                continue
+
+            try:
+                os.remove(still_exists)
+            except:
+                log.error('Failed removing non-used file: %s', traceback.format_exc())
 
         return True
-
 
     def removeDir(self, path):
         try:
             if os.path.isdir(path):
                 shutil.rmtree(path)
-        except OSError, inst:
-            os.chmod(inst.filename, 0777)
+        except OSError as inst:
+            os.chmod(inst.filename, 0o777)
             self.removeDir(path)
 
     def getVersion(self):
@@ -355,7 +366,8 @@ class SourceUpdater(BaseUpdater):
                 log.debug('Source version output: %s', output)
                 self.version = output
                 self.version['type'] = 'source'
-            except Exception, e:
+                self.version['repr'] = 'source:(%s:%s % s) %s (%s)' % (self.repo_user, self.repo_name, self.branch, output.get('hash', '')[:8], datetime.fromtimestamp(output.get('date', 0)))
+            except Exception as e:
                 log.error('Failed using source updater. %s', e)
                 return {}
 
@@ -385,7 +397,7 @@ class SourceUpdater(BaseUpdater):
 
             return {
                 'hash': commit['sha'],
-                'date':  int(time.mktime(parse(commit['commit']['committer']['date']).timetuple())),
+                'date': int(time.mktime(parse(commit['commit']['committer']['date']).timetuple())),
             }
         except:
             log.error('Failed getting latest request from github: %s', traceback.format_exc())
@@ -430,7 +442,7 @@ class DesktopUpdater(BaseUpdater):
             if latest and latest != current_version.get('hash'):
                 self.update_version = {
                     'hash': latest,
-                    'date':  None,
+                    'date': None,
                     'changelog': self.desktop._changelogURL,
                 }
 
@@ -442,6 +454,7 @@ class DesktopUpdater(BaseUpdater):
 
     def getVersion(self):
         return {
+            'repr': 'desktop: %s' % self.desktop._esky.active_version,
             'hash': self.desktop._esky.active_version,
             'date': None,
             'type': 'desktop',
