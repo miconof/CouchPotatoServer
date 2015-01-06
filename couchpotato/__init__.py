@@ -1,3 +1,7 @@
+import os
+import time
+import traceback
+
 from couchpotato.api import api_docs, api_docs_missing, api
 from couchpotato.core.event import fireEvent
 from couchpotato.core.helpers.variable import md5, tryInt
@@ -5,15 +9,13 @@ from couchpotato.core.logger import CPLog
 from couchpotato.environment import Env
 from tornado import template
 from tornado.web import RequestHandler, authenticated
-import os
-import time
-import traceback
 
 
 log = CPLog(__name__)
 
 views = {}
 template_loader = template.Loader(os.path.join(os.path.dirname(__file__), 'templates'))
+
 
 class BaseHandler(RequestHandler):
 
@@ -38,24 +40,33 @@ class WebHandler(BaseHandler):
             return
 
         try:
+            if route == 'robots.txt':
+                self.set_header('Content-Type', 'text/plain')
             self.write(views[route]())
         except:
             log.error("Failed doing web request '%s': %s", (route, traceback.format_exc()))
             self.write({'success': False, 'error': 'Failed returning results'})
 
 
-def addView(route, func, static = False):
+def addView(route, func):
     views[route] = func
 
 
-def get_session():
-    return Env.getSession()
+def get_db():
+    return Env.get('db')
 
 
 # Web view
 def index():
     return template_loader.load('index.html').generate(sep = os.sep, fireEvent = fireEvent, Env = Env)
 addView('', index)
+
+
+# Web view
+def robots():
+    return 'User-agent: * \n' \
+           'Disallow: /'
+addView('robots.txt', robots)
 
 
 # API docs
@@ -71,8 +82,16 @@ def apiDocs():
 addView('docs', apiDocs)
 
 
+# Database debug manager
+def databaseManage():
+    return template_loader.load('database.html').generate(fireEvent = fireEvent, Env = Env)
+
+addView('database', databaseManage)
+
+
 # Make non basic auth option to get api key
 class KeyHandler(RequestHandler):
+
     def get(self, *args, **kwargs):
         api_key = None
 

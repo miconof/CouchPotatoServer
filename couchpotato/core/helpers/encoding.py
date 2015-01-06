@@ -1,11 +1,14 @@
-from couchpotato.core.logger import CPLog
 from string import ascii_letters, digits
 from urllib import quote_plus
 import os
 import re
 import traceback
 import unicodedata
+
+from chardet import detect
+from couchpotato.core.logger import CPLog
 import six
+
 
 log = CPLog(__name__)
 
@@ -33,13 +36,16 @@ def toUnicode(original, *args):
                 return six.text_type(original, *args)
             except:
                 try:
-                    return ek(original, *args)
+                    detected = detect(original)
+                    try:
+                        return original.decode(detected.get('encoding'))
+                    except:
+                        return ek(original, *args)
                 except:
                     raise
     except:
         log.error('Unable to decode value "%s..." : %s ', (repr(original)[:20], traceback.format_exc()))
-        ascii_text = str(original).encode('string_escape')
-        return toUnicode(ascii_text)
+        return 'ERROR DECODING STRING'
 
 
 def ss(original, *args):
@@ -50,7 +56,10 @@ def ss(original, *args):
         return u_original.encode(Env.get('encoding'))
     except Exception as e:
         log.debug('Failed ss encoding char, force UTF8: %s', e)
-        return u_original.encode('UTF-8')
+        try:
+            return u_original.encode(Env.get('encoding'), 'replace')
+        except:
+            return u_original.encode('utf-8', 'replace')
 
 
 def sp(path, *args):
@@ -83,7 +92,7 @@ def ek(original, *args):
     if isinstance(original, (str, unicode)):
         try:
             from couchpotato.environment import Env
-            return original.decode(Env.get('encoding'))
+            return original.decode(Env.get('encoding'), 'ignore')
         except UnicodeDecodeError:
             raise
 
