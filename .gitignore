@@ -1,6 +1,9 @@
 *.pyc
 /data/
+/_env/
 /_source/
 .project
 .pydevproject
-tor/
+node_modules
+.tmp
+torrents/
